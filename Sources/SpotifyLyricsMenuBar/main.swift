@@ -40,6 +40,43 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
     private var trackTimer: Timer?
     private var lyricTimer: Timer?
 
+    private let checkRunningScript: NSAppleScript
+    private let fetchStateScript: NSAppleScript
+    private let decoder = JSONDecoder()
+    private lazy var ephemeralSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        return URLSession(configuration: config)
+    }()
+
+    override init() {
+        let checkSource = "application \"Spotify\" is running"
+        let fetchSource = """
+        tell application "Spotify"
+            if player state is playing or player state is paused then
+                set t to name of current track
+                set a to artist of current track
+                set p to player position
+                set d to (duration of current track) / 1000
+                set i to id of current track
+                set s to player state as string
+                return t & "||" & a & "||" & p & "||" & d & "||" & i & "||" & s
+            else
+                return ""
+            end if
+        end tell
+        """
+
+        self.checkRunningScript = NSAppleScript(source: checkSource)!
+        self.fetchStateScript = NSAppleScript(source: fetchSource)!
+
+        var error: NSDictionary?
+        _ = self.checkRunningScript.executeAndReturnError(&error)
+        _ = self.fetchStateScript.executeAndReturnError(&error)
+
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
@@ -121,100 +158,91 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
 
     private func checkTrack() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
+            autoreleasepool {
+                guard let self else { return }
 
-            guard let state = self.getSpotifyState() else {
+                guard let state = self.getSpotifyState() else {
+                    self.stateQueue.sync {
+                        self.currentTrackID = nil
+                        self.lyrics = []
+                        self.lastDisplayed = ""
+                    }
+                    DispatchQueue.main.async {
+                        self.statusItem.button?.title = placeholder
+                        self.nowPlayingItem.title = "Now Playing: -"
+                    }
+                    return
+                }
+
+                let changed = self.stateQueue.sync { state.id != self.currentTrackID }
+                guard changed else { return }
+
                 self.stateQueue.sync {
-                    self.currentTrackID = nil
+                    self.currentTrackID = state.id
                     self.lyrics = []
                     self.lastDisplayed = ""
                 }
+
                 DispatchQueue.main.async {
-                    self.statusItem.button?.title = placeholder
-                    self.nowPlayingItem.title = "Now Playing: -"
+                    self.nowPlayingItem.title = "♪ \(state.track) — \(state.artist)"
+                    self.statusItem.button?.title = "Loading lyrics..."
                 }
-                return
-            }
 
-            let changed = self.stateQueue.sync { state.id != self.currentTrackID }
-            guard changed else { return }
+                let fetchedLyrics = self.fetchLyrics(track: state.track, artist: state.artist, duration: state.duration)
+                self.stateQueue.sync {
+                    self.lyrics = fetchedLyrics
+                }
 
-            self.stateQueue.sync {
-                self.currentTrackID = state.id
-                self.lyrics = []
-                self.lastDisplayed = ""
-            }
-
-            DispatchQueue.main.async {
-                self.nowPlayingItem.title = "♪ \(state.track) — \(state.artist)"
-                self.statusItem.button?.title = "Loading lyrics..."
-            }
-
-            let fetchedLyrics = self.fetchLyrics(track: state.track, artist: state.artist, duration: state.duration)
-            self.stateQueue.sync {
-                self.lyrics = fetchedLyrics
-            }
-
-            if fetchedLyrics.isEmpty {
-                DispatchQueue.main.async {
-                    self.statusItem.button?.title = "♪ (no lyrics found)"
+                if fetchedLyrics.isEmpty {
+                    DispatchQueue.main.async {
+                        self.statusItem.button?.title = "♪ (no lyrics found)"
+                    }
                 }
             }
         }
     }
 
     private func updateLyric() {
+        let hasTrack = stateQueue.sync { currentTrackID != nil && !lyrics.isEmpty }
+        guard hasTrack else { return }
+
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
+            autoreleasepool {
+                guard let self else { return }
 
-            let snapshot = self.stateQueue.sync { (self.currentTrackID, self.lyrics, self.lastDisplayed, self.lyricOffset) }
-            guard snapshot.0 != nil, !snapshot.1.isEmpty else { return }
-            guard let state = self.getSpotifyState(), state.playing else { return }
+                let snapshot = self.stateQueue.sync { (self.currentTrackID, self.lyrics, self.lastDisplayed, self.lyricOffset) }
+                guard snapshot.0 != nil, !snapshot.1.isEmpty else { return }
+                guard let state = self.getSpotifyState(), state.playing else { return }
 
-            let adjustedPosition = state.position + snapshot.3
-            var currentLine = ""
-            for lyric in snapshot.1 {
-                if lyric.timestamp <= adjustedPosition {
-                    currentLine = lyric.text
-                } else {
-                    break
+                let adjustedPosition = state.position + snapshot.3
+                var currentLine = ""
+                for lyric in snapshot.1 {
+                    if lyric.timestamp <= adjustedPosition {
+                        currentLine = lyric.text
+                    } else {
+                        break
+                    }
                 }
-            }
 
-            guard !currentLine.isEmpty, currentLine != snapshot.2 else { return }
-            let displayed = Self.truncated(currentLine)
+                guard !currentLine.isEmpty, currentLine != snapshot.2 else { return }
+                let displayed = Self.truncated(currentLine)
 
-            self.stateQueue.sync {
-                self.lastDisplayed = currentLine
-            }
-            DispatchQueue.main.async {
-                self.statusItem.button?.title = displayed
+                self.stateQueue.sync {
+                    self.lastDisplayed = currentLine
+                }
+                DispatchQueue.main.async {
+                    self.statusItem.button?.title = displayed
+                }
             }
         }
     }
 
     private func getSpotifyState() -> SpotifyState? {
-        guard appleScript("application \"Spotify\" is running") == "true" else {
+        guard executeAppleScript(checkRunningScript) == "true" else {
             return nil
         }
 
-        let script = """
-        tell application "Spotify"
-            if player state is playing or player state is paused then
-                set t to name of current track
-                set a to artist of current track
-                set p to player position
-                set d to (duration of current track) / 1000
-                set i to id of current track
-                set s to player state as string
-                return t & "||" & a & "||" & p & "||" & d & "||" & i & "||" & s
-            else
-                return ""
-            end if
-        end tell
-        """
-
-        let output = appleScript(script)
+        let output = executeAppleScript(fetchStateScript)
         let parts = output.components(separatedBy: "||")
         guard parts.count >= 6 else { return nil }
 
@@ -235,11 +263,10 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func appleScript(_ script: String) -> String {
+    private func executeAppleScript(_ script: NSAppleScript) -> String {
         var error: NSDictionary?
-        guard let result = NSAppleScript(source: script)?.executeAndReturnError(&error) else {
-            return ""
-        }
+        let result = script.executeAndReturnError(&error)
+        guard error == nil else { return "" }
         return result.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
@@ -276,7 +303,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         }
 
         do {
-            let results = try JSONDecoder().decode([LRCLibResponse].self, from: searchData)
+            let results = try decoder.decode([LRCLibResponse].self, from: searchData)
             guard let first = results.first else { return [] }
             return lyrics(from: first, duration: duration)
         } catch {
@@ -299,7 +326,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         var resultData: Data?
         var statusCode = 0
 
-        URLSession.shared.dataTask(with: request) { data, response, _ in
+        ephemeralSession.dataTask(with: request) { data, response, _ in
             resultData = data
             statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
             semaphore.signal()
@@ -312,7 +339,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
 
     private func parseLRCLib(data: Data, duration: TimeInterval) -> [LyricLine] {
         do {
-            let response = try JSONDecoder().decode(LRCLibResponse.self, from: data)
+            let response = try decoder.decode(LRCLibResponse.self, from: data)
             return lyrics(from: response, duration: duration)
         } catch {
             return []
@@ -340,13 +367,12 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func parseLRC(_ lrcText: String) -> [LyricLine] {
-        let pattern = #"^\[(\d+):(\d+\.?\d*)\](.*)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+    private static let lrcRegex = try! NSRegularExpression(pattern: #"^\[(\d+):(\d+\.?\d*)\](.*)$"#)
 
+    private func parseLRC(_ lrcText: String) -> [LyricLine] {
         let lines = lrcText.components(separatedBy: .newlines).compactMap { line -> LyricLine? in
             let range = NSRange(line.startIndex..<line.endIndex, in: line)
-            guard let match = regex.firstMatch(in: line, range: range), match.numberOfRanges == 4 else {
+            guard let match = Self.lrcRegex.firstMatch(in: line, range: range), match.numberOfRanges == 4 else {
                 return nil
             }
             guard
