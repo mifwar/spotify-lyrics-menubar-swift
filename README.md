@@ -4,7 +4,7 @@ A tiny native macOS menu bar app that shows time-synced lyrics for the song curr
 
 This Swift/AppKit port runs as a normal `.app`, so users do not need Python, pip, or a virtualenv.
 
-Inspired by Nadia Levy's original Python project: https://github.com/nadialvy/spotify-lyrics-menubar
+Inspired by Nadia Lovely's original Python project: https://github.com/nadialvy/spotify-lyrics-menubar
 
 ## Requirements
 
