@@ -6,6 +6,8 @@ This Swift/AppKit version packages the same idea as a native macOS `.app` for pe
 
 Inspired by Nadia Lovely's original Python project: https://github.com/nadialvy/spotify-lyrics-menubar
 
+![Spotify Lyrics Menu Bar showing synced lyrics and menu actions](assets/screenshot.png)
+
 ## Requirements
 
 - macOS
