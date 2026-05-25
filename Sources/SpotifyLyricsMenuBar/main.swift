@@ -6,6 +6,7 @@ private let pollInterval: TimeInterval = 0.4
 private let trackCheckInterval: TimeInterval = 2.0
 private let placeholder = "♪ Lyrics"
 private let userAgent = "SpotifyLyricsMenuBarSwift/1.0 (personal use)"
+private let lyricOffsetKey = "lyricOffset"
 
 private struct SpotifyState {
     let track: String
@@ -29,11 +30,13 @@ private struct LRCLibResponse: Decodable {
 private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let nowPlayingItem = NSMenuItem(title: "Now Playing: -", action: nil, keyEquivalent: "")
+    private let offsetItem = NSMenuItem(title: "Offset: 0.0s", action: nil, keyEquivalent: "")
     private let stateQueue = DispatchQueue(label: "SpotifyLyricsMenuBar.state")
 
     private var currentTrackID: String?
     private var lyrics: [LyricLine] = []
     private var lastDisplayed = ""
+    private var lyricOffset = UserDefaults.standard.double(forKey: lyricOffsetKey)
     private var trackTimer: Timer?
     private var lyricTimer: Timer?
 
@@ -45,10 +48,16 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(nowPlayingItem)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Refresh Lyrics", action: #selector(forceRefresh), keyEquivalent: "r"))
+        menu.addItem(menuItem(title: "Refresh Lyrics", action: #selector(forceRefresh), keyEquivalent: "r"))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+        menu.addItem(offsetItem)
+        menu.addItem(menuItem(title: "Lyrics Later (-0.5s)", action: #selector(decreaseOffset), keyEquivalent: "["))
+        menu.addItem(menuItem(title: "Lyrics Earlier (+0.5s)", action: #selector(increaseOffset), keyEquivalent: "]"))
+        menu.addItem(menuItem(title: "Reset Offset", action: #selector(resetOffset), keyEquivalent: "0"))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
+        updateOffsetMenuItem()
 
         trackTimer = Timer.scheduledTimer(withTimeInterval: trackCheckInterval, repeats: true) { [weak self] _ in
             self?.checkTrack()
@@ -60,6 +69,12 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         checkTrack()
     }
 
+    private func menuItem(title: String, action: Selector, keyEquivalent: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        item.target = self
+        return item
+    }
+
     @objc private func forceRefresh() {
         stateQueue.sync {
             currentTrackID = nil
@@ -67,8 +82,41 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         checkTrack()
     }
 
+    @objc private func decreaseOffset() {
+        adjustOffset(by: -0.5)
+    }
+
+    @objc private func increaseOffset() {
+        adjustOffset(by: 0.5)
+    }
+
+    @objc private func resetOffset() {
+        setOffset(0)
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    private func adjustOffset(by delta: TimeInterval) {
+        let nextOffset = stateQueue.sync { lyricOffset + delta }
+        setOffset(nextOffset)
+    }
+
+    private func setOffset(_ offset: TimeInterval) {
+        let roundedOffset = (offset * 2).rounded() / 2
+        stateQueue.sync {
+            lyricOffset = roundedOffset
+            lastDisplayed = ""
+        }
+        UserDefaults.standard.set(roundedOffset, forKey: lyricOffsetKey)
+        updateOffsetMenuItem()
+        updateLyric()
+    }
+
+    private func updateOffsetMenuItem() {
+        let offset = stateQueue.sync { lyricOffset }
+        offsetItem.title = String(format: "Offset: %+.1fs", offset)
     }
 
     private func checkTrack() {
@@ -119,13 +167,14 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
 
-            let snapshot = self.stateQueue.sync { (self.currentTrackID, self.lyrics, self.lastDisplayed) }
+            let snapshot = self.stateQueue.sync { (self.currentTrackID, self.lyrics, self.lastDisplayed, self.lyricOffset) }
             guard snapshot.0 != nil, !snapshot.1.isEmpty else { return }
             guard let state = self.getSpotifyState(), state.playing else { return }
 
+            let adjustedPosition = state.position + snapshot.3
             var currentLine = ""
             for lyric in snapshot.1 {
-                if lyric.timestamp <= state.position {
+                if lyric.timestamp <= adjustedPosition {
                     currentLine = lyric.text
                 } else {
                     break

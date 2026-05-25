@@ -25,6 +25,8 @@ If macOS still blocks the app, open System Settings > Privacy & Security, then c
 
 Note: release builds are not notarized yet, so macOS may show an "unidentified developer" warning after download.
 
+Use the menu bar app menu to move lyric timing earlier or later in 0.5 second steps. The offset is saved automatically.
+
 ## Development
 
 Build the app locally:
