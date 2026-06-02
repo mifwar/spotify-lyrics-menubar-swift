@@ -6,7 +6,11 @@ This Swift/AppKit version packages the same idea as a native macOS `.app` for pe
 
 Inspired by Nadia Lovely's original Python project: https://github.com/nadialvy/spotify-lyrics-menubar
 
-![Spotify Lyrics Menu Bar showing synced lyrics and menu actions](assets/screenshot.png)
+![Spotify Lyrics Menu Bar showing synced lyrics in the menu bar](assets/screenshot.png)
+
+![Lyrics panel showing the current line with surrounding lyrics](assets/lyrics-panel.png)
+
+![Menu actions for refreshing, searching, importing, and adjusting lyrics](assets/lyrics-menu.png)
 
 ## Requirements
 
@@ -56,10 +60,19 @@ The GitHub Actions release workflow builds and uploads `SpotifyLyricsMenuBar.dmg
 ## How It Works
 
 - Reads the current track, artist, and playback position from Spotify via AppleScript.
-- Fetches synced lyrics from lrclib.net.
+- Fetches synced lyrics from lrclib.net and caches successful matches locally.
 - Falls back to plain lyrics with estimated timing when synced lyrics are unavailable.
+- Retries failed lyric lookups and can open LRCLib search for manual recovery.
 - Updates the menu bar title as the song progresses.
 - Click the menu bar icon to see a 7-line lyrics panel.
+
+## Menu Actions
+
+- **Refresh Lyrics** — Refetches the current song and bypasses the local lyrics cache.
+- **Open LRCLib Search** — Opens LRCLib search for the current track.
+- **Import Lyrics from Clipboard** — Imports copied LRC lyrics for the current song and saves them to the local cache.
+- **Use Plain Lyrics** — Ignores synced timestamps and spreads plain lyric lines across the song duration.
+- **Lyrics Earlier / Later** — Saves a per-song timing offset in 0.5 second steps.
 
 ## Troubleshooting Sync Issues
 
