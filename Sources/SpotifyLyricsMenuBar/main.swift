@@ -16,7 +16,7 @@ private let lyricsPanelLineSpacing: CGFloat = 4
 private let placeholder = "♪ Lyrics"
 private let loadingPlaceholder = "♪···"
 private let userAgent = "SpotifyLyricsMenuBarSwift/1.0 (personal use)"
-private let lyricOffsetsKey = "lyricOffsets"
+private let maxLyricsMatchScore = 5_000.0
 private let lyricsCacheFilename = "lyrics-cache.json"
 private let lrclibSearchBaseURL = "https://lrclib.net/search/"
 
@@ -42,6 +42,8 @@ private struct LyricsLookup {
 }
 
 private struct LRCLibResponse: Codable {
+    let trackName: String?
+    let artistName: String?
     let syncedLyrics: String?
     let plainLyrics: String?
     let duration: Double?
@@ -50,6 +52,20 @@ private struct LRCLibResponse: Codable {
 private struct CachedLyrics: Codable {
     let response: LRCLibResponse
     let cachedAt: Date
+    let offset: Double
+
+    init(response: LRCLibResponse, cachedAt: Date, offset: Double = 0) {
+        self.response = response
+        self.cachedAt = cachedAt
+        self.offset = offset
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        response = try container.decode(LRCLibResponse.self, forKey: .response)
+        cachedAt = try container.decode(Date.self, forKey: .cachedAt)
+        offset = try container.decodeIfPresent(Double.self, forKey: .offset) ?? 0
+    }
 }
 
 private final class LyricsCache {
@@ -69,6 +85,9 @@ private final class LyricsCache {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         guard let data = try? Data(contentsOf: fileURL) else { return }
         entries = (try? decoder.decode([String: CachedLyrics].self, from: data)) ?? [:]
+        if !entries.isEmpty {
+            save()
+        }
     }
 
     func response(for key: String) -> LRCLibResponse? {
@@ -77,9 +96,41 @@ private final class LyricsCache {
         }
     }
 
+    func response(track: String, artist: String, duration: TimeInterval) -> LRCLibResponse? {
+        queue.sync {
+            let prefix = "\(track.lowercased())|\(artist.lowercased())|"
+            return entries
+                .compactMap { key, entry -> (LRCLibResponse, Double)? in
+                    guard key.hasPrefix(prefix),
+                          let cachedDuration = Double(key.dropFirst(prefix.count))
+                    else {
+                        return nil
+                    }
+                    return (entry.response, abs(cachedDuration - duration.rounded()))
+                }
+                .min(by: { $0.1 < $1.1 })?
+                .0
+        }
+    }
+
     func store(_ response: LRCLibResponse, for key: String) {
         queue.sync {
-            entries[key] = CachedLyrics(response: response, cachedAt: Date())
+            let offset = entries[key]?.offset ?? 0
+            entries[key] = CachedLyrics(response: response, cachedAt: Date(), offset: offset)
+            save()
+        }
+    }
+
+    func offset(for key: String) -> Double {
+        queue.sync {
+            entries[key]?.offset ?? 0
+        }
+    }
+
+    func storeOffset(_ offset: Double, for key: String) {
+        queue.sync {
+            guard let entry = entries[key] else { return }
+            entries[key] = CachedLyrics(response: entry.response, cachedAt: entry.cachedAt, offset: offset)
             save()
         }
     }
@@ -165,6 +216,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
     private var forcePlainLyrics = false
     private var shouldBypassLyricsCache = false
     private var lastLyricsFetchAttempt: Date?
+    private var lyricsFetchToken = UUID()
     private var currentStatusTitle = placeholder
     private var trackTimer: Timer?
     private var lyricTimer: Timer?
@@ -357,7 +409,13 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
 
         let lookup = lyricsLookup(track: state.track, artist: state.artist, duration: state.duration)
         let syncedLyrics = normalizedLRCText(pasted)
-        let response = LRCLibResponse(syncedLyrics: syncedLyrics, plainLyrics: nil, duration: lookup.duration)
+        let response = LRCLibResponse(
+            trackName: lookup.track,
+            artistName: lookup.artist,
+            syncedLyrics: syncedLyrics,
+            plainLyrics: nil,
+            duration: lookup.duration
+        )
         let importedLyrics = lyrics(from: response, duration: lookup.duration, forcePlain: false)
         guard !importedLyrics.isEmpty else {
             DispatchQueue.main.async {
@@ -377,6 +435,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
             forcePlainLyrics = false
             shouldBypassLyricsCache = false
             lastLyricsFetchAttempt = nil
+            lyricsFetchToken = UUID()
         }
         DispatchQueue.main.async {
             self.nowPlayingItem.title = "♪ \(state.track) — \(state.artist)"
@@ -399,10 +458,18 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         if shouldRefetch {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 guard let self, let state = self.getSpotifyState() else { return }
-                let fetched = self.fetchLyrics(track: state.track, artist: state.artist, duration: state.duration)
-                self.stateQueue.sync {
-                    self.lyrics = fetched
+                let fetchToken = self.stateQueue.sync { () -> UUID in
+                    let token = UUID()
+                    self.lyricsFetchToken = token
+                    return token
                 }
+                let fetched = self.fetchLyrics(track: state.track, artist: state.artist, duration: state.duration)
+                let shouldApplyFetch = self.stateQueue.sync { () -> Bool in
+                    guard self.lyricsFetchToken == fetchToken else { return false }
+                    self.lyrics = fetched
+                    return true
+                }
+                guard shouldApplyFetch else { return }
                 DispatchQueue.main.async {
                     self.updateLyric()
                 }
@@ -451,21 +518,18 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
     }
 
     private func storedLyricOffset(for cacheKey: String) -> TimeInterval {
-        let offsets = UserDefaults.standard.dictionary(forKey: lyricOffsetsKey) as? [String: Double]
-        if let offset = offsets?[cacheKey] {
-            return offset
+        let cachedOffset = lyricsCache.offset(for: cacheKey)
+        if cachedOffset != 0 {
+            return cachedOffset
         }
-        return 0
+        let legacyOffsets = UserDefaults.standard.dictionary(forKey: "lyricOffsets") as? [String: Double]
+        guard let legacyOffset = legacyOffsets?[cacheKey] else { return 0 }
+        lyricsCache.storeOffset(legacyOffset, for: cacheKey)
+        return legacyOffset
     }
 
     private func storeLyricOffset(_ offset: TimeInterval, for cacheKey: String) {
-        var offsets = UserDefaults.standard.dictionary(forKey: lyricOffsetsKey) as? [String: Double] ?? [:]
-        if offset == 0 {
-            offsets.removeValue(forKey: cacheKey)
-        } else {
-            offsets[cacheKey] = offset
-        }
-        UserDefaults.standard.set(offsets, forKey: lyricOffsetsKey)
+        lyricsCache.storeOffset(offset, for: cacheKey)
     }
 
     private func updatePlainLyricsMenuItem() {
@@ -488,6 +552,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
                         self.forcePlainLyrics = false
                         self.shouldBypassLyricsCache = false
                         self.lastLyricsFetchAttempt = nil
+                        self.lyricsFetchToken = UUID()
                     }
                     DispatchQueue.main.async {
                         self.setStatusTitle(placeholder)
@@ -502,11 +567,12 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
                 guard state.playing else { return }
 
                 let lookup = self.lyricsLookup(track: state.track, artist: state.artist, duration: state.duration)
-                let fetchInfo = self.stateQueue.sync { () -> (shouldFetch: Bool, isNewTrack: Bool, bypassCache: Bool) in
+                let fetchInfo = self.stateQueue.sync { () -> (shouldFetch: Bool, isNewTrack: Bool, bypassCache: Bool, token: UUID) in
                     let now = Date()
 
                     if state.id != self.currentTrackID {
                         let bypassCache = self.shouldBypassLyricsCache
+                        let token = UUID()
                         self.currentTrackID = state.id
                         self.currentLyricsCacheKey = lookup.cacheKey
                         self.lyrics = []
@@ -515,21 +581,24 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
                         self.forcePlainLyrics = false
                         self.shouldBypassLyricsCache = false
                         self.lastLyricsFetchAttempt = now
-                        return (true, true, bypassCache)
+                        self.lyricsFetchToken = token
+                        return (true, true, bypassCache, token)
                     }
 
                     guard self.lyrics.isEmpty else {
-                        return (false, false, false)
+                        return (false, false, false, self.lyricsFetchToken)
                     }
 
                     if let lastAttempt = self.lastLyricsFetchAttempt,
                        now.timeIntervalSince(lastAttempt) < lyricsRefetchInterval {
-                        return (false, false, false)
+                        return (false, false, false, self.lyricsFetchToken)
                     }
 
+                    let token = UUID()
                     self.lastDisplayed = ""
                     self.lastLyricsFetchAttempt = now
-                    return (true, false, true)
+                    self.lyricsFetchToken = token
+                    return (true, false, true, token)
                 }
                 guard fetchInfo.shouldFetch else { return }
 
@@ -549,9 +618,12 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
                     duration: state.duration,
                     bypassCache: fetchInfo.bypassCache
                 )
-                self.stateQueue.sync {
+                let shouldApplyFetch = self.stateQueue.sync { () -> Bool in
+                    guard self.lyricsFetchToken == fetchInfo.token else { return false }
                     self.lyrics = fetchedLyrics
+                    return true
                 }
+                guard shouldApplyFetch else { return }
                 DispatchQueue.main.async {
                     self.updateLyric()
                 }
@@ -687,6 +759,15 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
             }
         }
 
+        if !bypassCache,
+           let cachedResponse = lyricsCache.response(track: lookup.track, artist: lookup.artist, duration: lookup.duration) {
+            let cachedLyrics = lyrics(from: cachedResponse, duration: lookup.duration, forcePlain: forcePlain)
+            if !cachedLyrics.isEmpty {
+                lyricsCache.store(cachedResponse, for: lookup.cacheKey)
+                return cachedLyrics
+            }
+        }
+
         if let data = requestLRCLib(
             path: "/api/get",
             query: [
@@ -697,7 +778,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         ) {
             if let response = try? decoder.decode(LRCLibResponse.self, from: data) {
                 let parsed = lyrics(from: response, duration: lookup.duration, forcePlain: forcePlain)
-                if !parsed.isEmpty {
+                if !parsed.isEmpty, lyricsMatchScore(result: response, lookup: lookup) < maxLyricsMatchScore {
                     lyricsCache.store(response, for: lookup.cacheKey)
                     return parsed
                 }
@@ -739,9 +820,9 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
 
             let scored = results.compactMap { result -> (LRCLibResponse, Double)? in
                 guard result.syncedLyrics != nil || result.plainLyrics != nil else { return nil }
-                let resultDuration = result.duration ?? 0
-                let delta = abs(resultDuration - lookup.duration)
-                return (result, delta)
+                let score = lyricsMatchScore(result: result, lookup: lookup)
+                guard score < maxLyricsMatchScore else { return nil }
+                return (result, score)
             }
 
             guard let best = scored.min(by: { $0.1 < $1.1 })?.0 else { return nil }
@@ -769,6 +850,35 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
             duration: duration,
             cacheKey: lyricsCacheKey(track: cleanTrack, artist: cleanArtist, duration: duration)
         )
+    }
+
+    private func lyricsMatchScore(result: LRCLibResponse, lookup: LyricsLookup) -> Double {
+        let titlePenalty = textMatchPenalty(expected: lookup.track, actual: result.trackName)
+        let artistPenalty = textMatchPenalty(expected: lookup.artist, actual: result.artistName)
+        let durationDelta = abs((result.duration ?? lookup.duration) - lookup.duration)
+        return titlePenalty * 100 + artistPenalty * 50 + durationDelta
+    }
+
+    private func textMatchPenalty(expected: String, actual: String?) -> Double {
+        let expectedText = normalizedMatchText(expected)
+        guard !expectedText.isEmpty else { return 0 }
+        guard let actual, !actual.isEmpty else { return 20 }
+
+        let actualText = normalizedMatchText(actual)
+        if actualText == expectedText { return 0 }
+        if actualText.contains(expectedText) || expectedText.contains(actualText) { return 1 }
+        return 100
+    }
+
+    private func normalizedMatchText(_ text: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(.whitespaces)
+        let scalars = text.lowercased().unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(scalar) : " "
+        }
+        return String(scalars)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func lyricsCacheKey(track: String, artist: String, duration: TimeInterval) -> String {
