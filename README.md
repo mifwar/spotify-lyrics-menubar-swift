@@ -27,7 +27,9 @@ If macOS still blocks the app, open System Settings > Privacy & Security, then c
 
 Note: release builds are not notarized yet, so macOS may show an "unidentified developer" warning after download.
 
-Use the menu bar app menu to move lyric timing earlier or later in 0.5 second steps. The offset is saved automatically.
+Use the menu bar app menu to move lyric timing earlier or later in 0.5 second steps. The offset is saved per song automatically.
+
+Click the menu bar icon to open a popover showing the current line and surrounding lyrics.
 
 ## Development
 
@@ -57,3 +59,11 @@ The GitHub Actions release workflow builds and uploads `SpotifyLyricsMenuBar.dmg
 - Fetches synced lyrics from lrclib.net.
 - Falls back to plain lyrics with estimated timing when synced lyrics are unavailable.
 - Updates the menu bar title as the song progresses.
+- Click the menu bar icon to see a 7-line lyrics panel.
+
+## Troubleshooting Sync Issues
+
+If the synced lyrics are consistently off — some parts too fast, some too slow — the LRC file itself may be poorly timed. Two options:
+
+1. **Use Plain Lyrics** — Toggle "Use Plain Lyrics" from the menu. This ignores the LRC timestamps and spaces lines evenly across the song duration. The toggle resets automatically for the next song.
+2. **Adjust Offset** — Use "Lyrics Earlier / Later" to shift all lines by 0.5s steps. Good for constant-speed mismatches. Offsets are saved per song across launches.
