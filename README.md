@@ -35,6 +35,19 @@ Use the menu bar app menu to move lyric timing earlier or later in 0.5 second st
 
 Click the menu bar icon to open a popover showing the current line and surrounding lyrics.
 
+## Display Modes
+
+The app has two display modes. Switch between them from the menu bar menu under **Display Mode**:
+
+- **Menu Bar** (default): the current lyric line appears directly in the menu bar.
+- **Floating**: the menu bar item shrinks to a compact `♪` indicator and the lyrics move to a small floating panel showing the current line with its surrounding lines.
+
+Floating mode is useful when menu bar space is limited, for example on MacBooks with a notch.
+
+The floating panel can be dragged anywhere by its background and resized from its edges or corners. Making it shorter reveals fewer surrounding lines, down to just the current line; making it taller reveals them again (up to 3 lines before and after the current one). Dragging or resizing never steals keyboard focus from other apps.
+
+The selected display mode and the panel's position and size are persisted and restored on the next launch.
+
 ## Development
 
 Build the app locally:
