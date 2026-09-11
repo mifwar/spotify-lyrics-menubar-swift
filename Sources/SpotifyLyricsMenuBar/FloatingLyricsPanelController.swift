@@ -21,6 +21,14 @@ private let panelAutosaveName = "FloatingLyricsPanel"
 
 private let cursorEdgeThickness: CGFloat = 8
 
+/// MiniLyrics-style fade: opacity falls off with distance from the center
+/// line, so the current lyric dominates and outer lines melt into the panel.
+/// ponytail: linear falloff, ease curve if it reads too sharp.
+private func lineAlpha(forSlot slot: Int) -> CGFloat {
+    let center = (panelLineCount - 1) / 2
+    return 1.0 - CGFloat(abs(slot - center)) * 0.24
+}
+
 /// Content view that sets cursor feedback for the borderless panel: resize
 /// cursors near the edges, an open hand over the draggable interior.
 /// Borderless windows get no automatic cursor management from AppKit.
@@ -173,7 +181,7 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
                 label.textColor = lastIsPlaceholder ? .secondaryLabelColor : .labelColor
             } else {
                 label.font = surroundingLineFont
-                label.textColor = .secondaryLabelColor
+                label.textColor = .labelColor.withAlphaComponent(lineAlpha(forSlot: i) * 0.8)
             }
         }
     }
