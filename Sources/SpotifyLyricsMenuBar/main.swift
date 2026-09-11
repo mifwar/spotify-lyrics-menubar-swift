@@ -15,10 +15,25 @@ private let lyricsPanelLineHeight: CGFloat = 19
 private let lyricsPanelLineSpacing: CGFloat = 4
 private let placeholder = "♪ Lyrics"
 private let loadingPlaceholder = "♪···"
+private let floatingPlaceholder = "♪"
+private let displayModeDefaultsKey = "lyricsDisplayMode"
 private let userAgent = "SpotifyLyricsMenuBarSwift/1.0 (personal use)"
 private let maxLyricsMatchScore = 5_000.0
 private let lyricsCacheFilename = "lyrics-cache.json"
 private let lrclibSearchBaseURL = "https://lrclib.net/search/"
+
+private enum LyricsDisplayMode: String {
+    case menuBar
+    case floating
+}
+
+/// Last rendered presentation, replayed when the display mode changes.
+/// Main thread only.
+private struct LyricsPresentation {
+    var menuBarTitle = placeholder
+    var floatingLines: [(text: String, isCurrent: Bool)]?
+    var isPlaceholder = false
+}
 
 private struct SpotifyState {
     let track: String
@@ -205,6 +220,10 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
     private let nowPlayingItem = NSMenuItem(title: "Now Playing: -", action: nil, keyEquivalent: "")
     private let offsetItem = NSMenuItem(title: "Offset: 0.0s", action: nil, keyEquivalent: "")
     private let plainLyricsItem = NSMenuItem(title: "Use Plain Lyrics", action: #selector(togglePlainLyrics), keyEquivalent: "p")
+    private let menuBarModeItem = NSMenuItem(title: "Menu Bar", action: #selector(selectDisplayMode(_:)), keyEquivalent: "")
+    private let floatingModeItem = NSMenuItem(title: "Floating", action: #selector(selectDisplayMode(_:)), keyEquivalent: "")
+    private lazy var floatingPanelController = FloatingLyricsPanelController()
+    private var presentation = LyricsPresentation()
     private let stateQueue = DispatchQueue(label: "SpotifyLyricsMenuBar.state")
     private let appleScriptQueue = DispatchQueue(label: "SpotifyLyricsMenuBar.appleScript")
 
@@ -265,10 +284,14 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         }
     }
 
+    private var displayMode: LyricsDisplayMode {
+        LyricsDisplayMode(rawValue: UserDefaults.standard.string(forKey: displayModeDefaultsKey) ?? "") ?? .menuBar
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        setStatusTitle(placeholder)
+        presentStatus(title: placeholder, floatingLines: nil)
         configureStatusButton()
 
         lyricsPanelVC.preferredContentSize = NSSize(width: lyricsPanelWidth, height: lyricsPanelMinHeight)
@@ -291,6 +314,17 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         menu.addItem(.separator())
         menu.addItem(plainLyricsItem)
         menu.addItem(.separator())
+        let displayModeItem = NSMenuItem(title: "Display Mode", action: nil, keyEquivalent: "")
+        let displayModeSubmenu = NSMenu()
+        menuBarModeItem.target = self
+        menuBarModeItem.representedObject = LyricsDisplayMode.menuBar.rawValue
+        floatingModeItem.target = self
+        floatingModeItem.representedObject = LyricsDisplayMode.floating.rawValue
+        displayModeSubmenu.addItem(menuBarModeItem)
+        displayModeSubmenu.addItem(floatingModeItem)
+        displayModeItem.submenu = displayModeSubmenu
+        menu.addItem(displayModeItem)
+        menu.addItem(.separator())
         menu.addItem(offsetItem)
         menu.addItem(menuItem(title: "Lyrics Later (-0.5s)", action: #selector(decreaseOffset), keyEquivalent: "["))
         menu.addItem(menuItem(title: "Lyrics Earlier (+0.5s)", action: #selector(increaseOffset), keyEquivalent: "]"))
@@ -301,6 +335,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         plainLyricsItem.target = self
         updateOffsetMenuItem()
         updatePlainLyricsMenuItem()
+        updateDisplayModeMenuItems()
 
         trackTimer = Timer.scheduledTimer(withTimeInterval: trackCheckInterval, repeats: true) { [weak self] _ in
             self?.checkTrack()
@@ -419,7 +454,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         let importedLyrics = lyrics(from: response, duration: lookup.duration, forcePlain: false)
         guard !importedLyrics.isEmpty else {
             DispatchQueue.main.async {
-                self.setStatusTitle("♪ (invalid lyrics)")
+                self.presentStatus(title: "♪ (invalid lyrics)", floatingLines: [("Invalid clipboard lyrics", true)], isPlaceholder: true)
                 self.updateLyricsPanel(lines: [("", false), ("", false), ("", false), ("Invalid clipboard lyrics", true), ("", false), ("", false), ("", false)])
             }
             return
@@ -441,6 +476,46 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
             self.nowPlayingItem.title = "♪ \(state.track) — \(state.artist)"
             self.updatePlainLyricsMenuItem()
             self.updateLyric()
+        }
+    }
+
+    @objc private func selectDisplayMode(_ sender: NSMenuItem) {
+        guard let rawMode = sender.representedObject as? String,
+              LyricsDisplayMode(rawValue: rawMode) != nil
+        else {
+            return
+        }
+        UserDefaults.standard.set(rawMode, forKey: displayModeDefaultsKey)
+        updateDisplayModeMenuItems()
+        renderPresentation()
+    }
+
+    private func updateDisplayModeMenuItems() {
+        let mode = displayMode
+        menuBarModeItem.state = mode == .menuBar ? .on : .off
+        floatingModeItem.state = mode == .floating ? .on : .off
+    }
+
+    /// Single presentation path: every lyric/status update flows through here
+    /// and is rendered to the menu bar title and/or the floating panel.
+    /// Main thread only.
+    private func presentStatus(title: String, floatingLines: [(text: String, isCurrent: Bool)]?, isPlaceholder: Bool = false) {
+        presentation = LyricsPresentation(menuBarTitle: title, floatingLines: floatingLines, isPlaceholder: isPlaceholder)
+        renderPresentation()
+    }
+
+    private func renderPresentation() {
+        switch displayMode {
+        case .menuBar:
+            floatingPanelController.hide()
+            setStatusTitle(presentation.menuBarTitle)
+        case .floating:
+            setStatusTitle(floatingPlaceholder)
+            if let lines = presentation.floatingLines {
+                floatingPanelController.update(lines: lines, isPlaceholder: presentation.isPlaceholder)
+            } else {
+                floatingPanelController.hide()
+            }
         }
     }
 
@@ -555,7 +630,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
                         self.lyricsFetchToken = UUID()
                     }
                     DispatchQueue.main.async {
-                        self.setStatusTitle(placeholder)
+                        self.presentStatus(title: placeholder, floatingLines: nil)
                         self.nowPlayingItem.title = "Now Playing: -"
                         self.updateOffsetMenuItem()
                         self.updatePlainLyricsMenuItem()
@@ -604,7 +679,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
 
                 DispatchQueue.main.async {
                     self.nowPlayingItem.title = "♪ \(state.track) — \(state.artist)"
-                    self.setStatusTitle(loadingPlaceholder)
+                    self.presentStatus(title: loadingPlaceholder, floatingLines: [("Loading lyrics…", true)], isPlaceholder: true)
                     if fetchInfo.isNewTrack {
                         self.updateOffsetMenuItem()
                         self.updatePlainLyricsMenuItem()
@@ -630,7 +705,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
 
                 if fetchedLyrics.isEmpty {
                     DispatchQueue.main.async {
-                        self.setStatusTitle("♪ (no lyrics found)")
+                        self.presentStatus(title: "♪ (no lyrics found)", floatingLines: [("No lyrics found", true)], isPlaceholder: true)
                         self.updateLyricsPanel(lines: [("", false), ("", false), ("", false), ("(no lyrics)", true), ("", false), ("", false), ("", false)])
                     }
                 }
@@ -677,7 +752,7 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
                     self.lastDisplayed = currentLine
                 }
                 DispatchQueue.main.async {
-                    self.setStatusTitle(displayed)
+                    self.presentStatus(title: displayed, floatingLines: panelLines)
                     self.updateLyricsPanel(lines: panelLines)
                 }
             }

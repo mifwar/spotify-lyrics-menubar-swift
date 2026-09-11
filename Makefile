@@ -3,7 +3,7 @@ BUNDLE := build/$(APP_NAME).app
 BINARY := $(BUNDLE)/Contents/MacOS/$(APP_NAME)
 DMG := dist/$(APP_NAME).dmg
 DMG_ROOT := dist/dmg-root
-SOURCES := Sources/SpotifyLyricsMenuBar/main.swift
+SOURCES := $(wildcard Sources/SpotifyLyricsMenuBar/*.swift)
 SWIFTC := CLANG_MODULE_CACHE_PATH="$(CURDIR)/build/ModuleCache" swiftc
 
 .PHONY: app dmg run clean
