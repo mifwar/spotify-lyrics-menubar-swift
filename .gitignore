@@ -4,3 +4,6 @@ dist/
 __pycache__/
 .codegraph/
 .cursor/
+.commandcode/
+# stray cache dumps accidentally saved to the repo root
+Untitled
