@@ -14,7 +14,7 @@ $(BINARY): $(SOURCES) Bundle/Info.plist
 	mkdir -p "$(BUNDLE)/Contents/MacOS"
 	cp Bundle/Info.plist "$(BUNDLE)/Contents/Info.plist"
 	printf 'APPL????' > "$(BUNDLE)/Contents/PkgInfo"
-	$(SWIFTC) -O -framework Cocoa -o "$(BINARY)" $(SOURCES)
+	$(SWIFTC) -O -target $(shell uname -m)-apple-macos12.0 -framework Cocoa -o "$(BINARY)" $(SOURCES)
 	codesign --force --sign - "$(BUNDLE)"
 
 dmg: app
