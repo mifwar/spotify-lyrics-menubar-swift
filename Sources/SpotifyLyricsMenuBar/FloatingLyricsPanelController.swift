@@ -10,10 +10,10 @@ private let panelTopMargin: CGFloat = 8
 // Height floor fits a single (current) line; shrinking the panel reveals
 // fewer surrounding lines instead of squishing them.
 private let panelMinSize = NSSize(width: 160, height: 43)
-private let panelLineCount = 7
+private let panelLineCount = LyricsWindow.radius * 2 + 1
 private let panelDefaultContentSize = NSSize(
     width: 480,
-    height: 12 * 2 + CGFloat(7) * 19 + CGFloat(6) * 4
+    height: 12 * 2 + CGFloat(LyricsWindow.radius * 2 + 1) * 19 + CGFloat(LyricsWindow.radius * 2) * 4
 )
 private let currentLineFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
 private let surroundingLineFont = NSFont.systemFont(ofSize: 13)
@@ -56,7 +56,7 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
     private let panel: NSPanel
     private let stack = NSStackView()
     private var labels: [NSTextField] = []
-    private var lastLines: [(text: String, isCurrent: Bool)] = []
+    private var lastWindow: LyricsWindow?
     private var lastIsPlaceholder = false
     private var maxVisibleLines = panelLineCount
 
@@ -143,12 +143,16 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
     }
 
     /// Shows the panel if hidden and updates the displayed lines. Main thread only.
-    func update(lines: [(text: String, isCurrent: Bool)], isPlaceholder: Bool) {
-        let previousCurrent = lastLines.count == panelLineCount ? lastLines[3].text : nil
+    func update(_ presentation: LyricsPresentation) {
+        guard let window = presentation.window else {
+            hide()
+            return
+        }
+        let previousCurrent = lastWindow?.current?.text
         let wasPlaceholder = lastIsPlaceholder
         let wasVisible = panel.isVisible
-        lastLines = lines
-        lastIsPlaceholder = isPlaceholder
+        lastWindow = window
+        lastIsPlaceholder = presentation.isPlaceholder
         renderLines()
         if !panel.isVisible {
             panel.orderFrontRegardless()
@@ -163,8 +167,8 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
     private func scrollToCurrentLine(from previousCurrent: String?, wasPlaceholder: Bool, wasVisible: Bool) {
         guard wasVisible, !lastIsPlaceholder, !wasPlaceholder,
               let previous = previousCurrent,
-              lastLines.count == panelLineCount,
-              lastLines[3].text != previous
+              let window = lastWindow,
+              window.current?.text != previous
         else {
             cancelScrollAnimation()
             return
@@ -175,10 +179,14 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
         let down: CGFloat = (stack.layer?.isGeometryFlipped ?? stack.isFlipped) ? 1 : -1
         // Seamless only when the previous current line is now exactly one slot
         // over; anything further is a seek and snaps.
+        let rows = window.rows(radius: LyricsWindow.radius)
+        let center = LyricsWindow.radius
+        let before = rows[center - 1]?.text
+        let after = rows[center + 1]?.text
         let offset: CGFloat
-        if lastLines[2].text == previous {
+        if before == previous {
             offset = -down * stride // advanced: new lines enter from below
-        } else if lastLines[4].text == previous {
+        } else if after == previous {
             offset = down * stride // retreated: new lines enter from above
         } else {
             cancelScrollAnimation()
@@ -218,21 +226,25 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Maps the incoming lines onto the label slots, centered on the current
-    /// line, hiding outer pairs that don't fit the panel's current height.
+    /// Maps the window's slots onto the label slots, hiding outer pairs that
+    /// don't fit the panel's current height.
     private func renderLines() {
-        let base = max(0, (panelLineCount - lastLines.count) / 2)
+        guard let window = lastWindow else {
+            labels.forEach { $0.isHidden = true }
+            return
+        }
+        let rows = window.rows(radius: LyricsWindow.radius)
         let half = maxVisibleLines / 2
+        let center = LyricsWindow.radius
         for (i, label) in labels.enumerated() {
-            let withinHeight = i >= 3 - half && i <= 3 + half
-            let source = i - base
-            guard withinHeight, source >= 0, source < lastLines.count, !lastLines[source].text.isEmpty else {
+            let withinHeight = i >= center - half && i <= center + half
+            guard withinHeight, let line = rows[i], !line.text.isEmpty else {
                 label.isHidden = true
                 continue
             }
             label.isHidden = false
-            label.stringValue = lastLines[source].text
-            if lastLines[source].isCurrent {
+            label.stringValue = line.text
+            if i == center {
                 label.font = currentLineFont
                 label.textColor = lastIsPlaceholder ? .secondaryLabelColor : .labelColor
             } else {
