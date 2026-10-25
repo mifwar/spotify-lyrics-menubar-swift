@@ -20,6 +20,8 @@ private let surroundingLineFont = NSFont.systemFont(ofSize: 13)
 private let panelAutosaveName = "FloatingLyricsPanel"
 
 private let cursorEdgeThickness: CGFloat = 8
+private let scrollAnimationDuration: TimeInterval = 0.28
+private let scrollAnimationKey = "lyricsScroll"
 
 /// MiniLyrics-style fade: opacity falls off with distance from the center
 /// line, so the current lyric dominates and outer lines melt into the panel.
@@ -52,6 +54,7 @@ private final class FloatingPanelContentView: NSView {
 /// delegate; this just renders the lines it is given.
 final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
     private let panel: NSPanel
+    private let stack = NSStackView()
     private var labels: [NSTextField] = []
     private var lastLines: [(text: String, isCurrent: Bool)] = []
     private var lastIsPlaceholder = false
@@ -85,9 +88,9 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
         material.layer?.masksToBounds = true
         material.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = panelLineSpacing
+        stack.wantsLayer = true
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         for _ in 0..<panelLineCount {
@@ -141,12 +144,64 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
 
     /// Shows the panel if hidden and updates the displayed lines. Main thread only.
     func update(lines: [(text: String, isCurrent: Bool)], isPlaceholder: Bool) {
+        let previousCurrent = lastLines.count == panelLineCount ? lastLines[3].text : nil
+        let wasPlaceholder = lastIsPlaceholder
+        let wasVisible = panel.isVisible
         lastLines = lines
         lastIsPlaceholder = isPlaceholder
         renderLines()
         if !panel.isVisible {
             panel.orderFrontRegardless()
         }
+        scrollToCurrentLine(from: previousCurrent, wasPlaceholder: wasPlaceholder, wasVisible: wasVisible)
+    }
+
+    /// MiniLyrics-style roll: when the current line moves by exactly one line,
+    /// start the new content shifted one line and animate it back, so lines
+    /// slide instead of jumping. First show, seek, resize and placeholder
+    /// changes snap.
+    private func scrollToCurrentLine(from previousCurrent: String?, wasPlaceholder: Bool, wasVisible: Bool) {
+        guard wasVisible, !lastIsPlaceholder, !wasPlaceholder,
+              let previous = previousCurrent,
+              lastLines.count == panelLineCount,
+              lastLines[3].text != previous
+        else {
+            cancelScrollAnimation()
+            return
+        }
+        let stride = panelLineHeight + panelLineSpacing
+        // AppKit's backing layer may or may not be geometry-flipped; translate
+        // in whichever direction reads as "down" on this layer.
+        let down: CGFloat = (stack.layer?.isGeometryFlipped ?? stack.isFlipped) ? 1 : -1
+        // Seamless only when the previous current line is now exactly one slot
+        // over; anything further is a seek and snaps.
+        let offset: CGFloat
+        if lastLines[2].text == previous {
+            offset = -down * stride // advanced: new lines enter from below
+        } else if lastLines[4].text == previous {
+            offset = down * stride // retreated: new lines enter from above
+        } else {
+            cancelScrollAnimation()
+            return
+        }
+        animateScroll(offset: offset)
+    }
+
+    private func animateScroll(offset: CGFloat) {
+        guard let layer = stack.layer else { return }
+        layer.removeAnimation(forKey: scrollAnimationKey)
+        layer.transform = CATransform3DIdentity
+        let animation = CABasicAnimation(keyPath: "transform")
+        animation.fromValue = NSValue(caTransform3D: CATransform3DMakeTranslation(0, offset, 0))
+        animation.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        animation.duration = scrollAnimationDuration
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: scrollAnimationKey)
+    }
+
+    private func cancelScrollAnimation() {
+        stack.layer?.removeAnimation(forKey: scrollAnimationKey)
+        stack.layer?.transform = CATransform3DIdentity
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -158,6 +213,7 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
         n = max(1, n)
         if n != maxVisibleLines {
             maxVisibleLines = n
+            cancelScrollAnimation()
             renderLines()
         }
     }
@@ -187,6 +243,7 @@ final class FloatingLyricsPanelController: NSObject, NSWindowDelegate {
     }
 
     func hide() {
+        cancelScrollAnimation()
         panel.orderOut(nil)
     }
 
