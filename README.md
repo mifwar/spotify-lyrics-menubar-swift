@@ -41,12 +41,28 @@ The app has two display modes. Switch between them from the menu bar menu under 
 
 - **Menu Bar** (default): the current lyric line appears directly in the menu bar.
 - **Floating**: the menu bar item shrinks to a compact `♪` indicator and the lyrics move to a small floating panel showing the current line with its surrounding lines.
+- **Notch**: the lyrics attach to the notch and expand downward on hover. See below.
 
 Floating mode is useful when menu bar space is limited, for example on MacBooks with a notch.
 
 The floating panel can be dragged anywhere by its background and resized from its edges or corners. Making it shorter reveals fewer surrounding lines, down to just the current line; making it taller reveals them again (up to 3 lines before and after the current one). Dragging or resizing never steals keyboard focus from other apps.
 
 The selected display mode and the panel's position and size are persisted and restored on the next launch.
+
+### Notch
+
+In notch mode the menu bar item disappears and the current lyric line attaches to the notch itself, so nothing competes for menu bar space.
+
+- **Hover** the notch to expand it downward into five lines (the current one plus two either side) with the track artwork.
+- **Click a line** to seek to it. Seeking is disabled when the timing is estimated (plain lyrics fallback, imported lyrics without timestamps), because those timestamps are spread evenly rather than measured.
+- **Click the current line**, or the padding around it, to pin the panel open. A pinned panel ignores hover-out and the paused idle shrink; click again to unpin.
+- **Right-click** the panel for the usual menu: refresh, LRCLib search, clipboard import, plain lyrics, timing offsets.
+- Pausing shrinks it to a small dot after three seconds. With no track at all the dot stays, so the menu is always one right-click away even when Spotify is closed; left-clicking the dot opens the menu.
+- Over a fullscreen app that is not Spotify it hides, unless **Show over fullscreen apps** is checked in the menu (off by default).
+
+Displays without a notch, and external monitors, get the same pill at the top center of the screen instead of hanging off a cutout. **Display** in the menu picks which screen it attaches to; the choice is remembered by display, so it survives reconnects.
+
+Expansion, hover-out and the paused dot are all resolved from one state, so pinning while paused does not fight the idle timer.
 
 ## Development
 
