@@ -8,6 +8,9 @@ private let lyricsRefetchInterval: TimeInterval = 20.0
 private let minStatusItemWidth: CGFloat = 72
 private let maxStatusItemWidth: CGFloat = 360
 private let statusItemHorizontalPadding: CGFloat = 24
+// ponytail: caps how long a split line's timing is stretched, so a long
+// instrumental gap after a line doesn't hold the first half on screen.
+private let maxSplitLineDuration: TimeInterval = 8
 private let lyricsPanelWidth: CGFloat = 480
 private let lyricsPanelMinHeight: CGFloat = 84
 private let lyricsPanelVerticalPadding: CGFloat = 24
@@ -727,29 +730,43 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
 
                 let adjustedPosition = state.position + snapshot.3
                 var currentLine = ""
+                var lineStart = snapshot.1[0].timestamp
+                var lineEnd = state.duration
                 for lyric in snapshot.1 {
                     if lyric.timestamp <= adjustedPosition {
                         currentLine = lyric.text
+                        lineStart = lyric.timestamp
                     } else {
+                        lineEnd = lyric.timestamp
                         break
                     }
                 }
                 if currentLine.isEmpty, let first = snapshot.1.first {
                     currentLine = first.text
+                    lineEnd = snapshot.1.count > 1 ? snapshot.1[1].timestamp : state.duration
+                }
+
+                // Too wide for the menu bar: show it as two halves in sequence,
+                // switching part-way through the line in proportion to their length.
+                var menuBarLine = currentLine
+                if !Self.fitsStatusItem(currentLine), let (first, second) = Self.splitInTwo(currentLine) {
+                    let duration = min(max(lineEnd - lineStart, 0), maxSplitLineDuration)
+                    let switchAt = lineStart + duration * Double(first.count) / Double(currentLine.count)
+                    menuBarLine = adjustedPosition < switchAt ? first : second
                 }
 
                 let panelLines = self.panelLines(at: adjustedPosition, in: snapshot.1)
 
-                guard currentLine != snapshot.2 else {
+                guard menuBarLine != snapshot.2 else {
                     DispatchQueue.main.async {
                         self.updateLyricsPanel(lines: panelLines)
                     }
                     return
                 }
 
-                let displayed = Self.truncated(currentLine)
+                let displayed = Self.truncated(menuBarLine)
                 self.stateQueue.sync {
-                    self.lastDisplayed = currentLine
+                    self.lastDisplayed = menuBarLine
                 }
                 DispatchQueue.main.async {
                     self.presentStatus(title: displayed, floatingLines: panelLines)
@@ -1083,6 +1100,21 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         }
 
         return lines.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private static func fitsStatusItem(_ text: String) -> Bool {
+        let width = (text as NSString).size(withAttributes: [.font: NSFont.menuBarFont(ofSize: 0)]).width
+        return width + statusItemHorizontalPadding <= maxStatusItemWidth
+    }
+
+    /// Splits at the space nearest the middle; nil when there is no space.
+    private static func splitInTwo(_ text: String) -> (String, String)? {
+        let mid = text.index(text.startIndex, offsetBy: text.count / 2)
+        let candidates = [text[..<mid].lastIndex(of: " "), text[mid...].firstIndex(of: " ")].compactMap { $0 }
+        guard let split = candidates.min(by: {
+            abs(text.distance(from: $0, to: mid)) < abs(text.distance(from: $1, to: mid))
+        }) else { return nil }
+        return (String(text[..<split]), String(text[text.index(after: split)...]))
     }
 
     private static func truncated(_ text: String) -> String {
