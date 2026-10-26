@@ -105,17 +105,11 @@ final class SpotifyClient {
         return result.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    /// Fire-and-forget: clamps, compiles and sends on the seek queue, ignoring
-    /// every failure. Play/pause is left untouched — Spotify only moves its
-    /// player position here.
+    /// Fire-and-forget: clamps, then sends on the write queue. Play/pause is
+    /// left untouched — Spotify only moves its player position here.
     func seek(to seconds: TimeInterval) {
         guard seconds.isFinite else { return }
-        let source = Self.seekSource(to: seconds)
-        seekQueue.async {
-            guard let script = NSAppleScript(source: source) else { return }
-            var error: NSDictionary?
-            _ = script.executeAndReturnError(&error)
-        }
+        write(Self.seekSource(to: seconds))
     }
 
     /// Script text for one seek. Kept separate from sending it so the seconds
@@ -125,6 +119,41 @@ final class SpotifyClient {
         """
         tell application "Spotify" to set player position to \(max(0, seconds))
         """
+    }
+
+    // MARK: - Transport
+
+    /// Transport intent, fire-and-forget like every other write. These are the
+    /// system media-key verbs, including the one that surprises people: `next`
+    /// on a paused player starts playback, which is Spotify's own behaviour.
+    func playPause() {
+        write(Self.playPauseSource)
+    }
+
+    func nextTrack() {
+        write(Self.nextTrackSource)
+    }
+
+    func previousTrack() {
+        write(Self.previousTrackSource)
+    }
+
+    /// The transport verbs, kept as data so their text can be compiled and
+    /// checked without touching the user's playback.
+    static let playPauseSource = #"tell application "Spotify" to playpause"#
+    static let nextTrackSource = #"tell application "Spotify" to next track"#
+    static let previousTrackSource = #"tell application "Spotify" to previous track"#
+
+    /// The one place a write is sent: a private serial queue shared by seeks and
+    /// transport, so writes serialize with each other and never queue in front of
+    /// (or behind) the 0.4 s state poll. Nothing is reported on failure — the
+    /// poller shows what actually happened.
+    private func write(_ source: String) {
+        seekQueue.async {
+            guard let script = NSAppleScript(source: source) else { return }
+            var error: NSDictionary?
+            _ = script.executeAndReturnError(&error)
+        }
     }
 }
 

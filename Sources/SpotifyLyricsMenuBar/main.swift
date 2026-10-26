@@ -139,6 +139,9 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         notchController.onMenuRequest = { [weak self] screenPoint in
             self?.showStatusMenu(at: screenPoint)
         }
+        notchController.onTransport = { [weak self] command in
+            self?.engine.perform(command)
+        }
         // Fullscreen, screen arrangement and app switches change the answer to
         // "is the pill obscured" without any lyric update.
         let workspaceCenter = NSWorkspace.shared.notificationCenter

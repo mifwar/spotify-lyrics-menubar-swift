@@ -126,6 +126,21 @@ final class LyricsEngine {
         client.seek(to: target)
     }
 
+    /// Transport intent from a surface. Fire-and-forget: the poller reports what
+    /// Spotify actually did on the next tick, so nothing here guesses at the new
+    /// state (and a paused player is not optimistically resumed — `playpause`
+    /// toggles, and it is Spotify that decides).
+    func perform(_ command: TransportCommand) {
+        switch command {
+        case .playPause:
+            client.playPause()
+        case .next:
+            client.nextTrack()
+        case .previous:
+            client.previousTrack()
+        }
+    }
+
     /// Replaces the current song's lyrics with LRC text pasted by the user.
     /// Main thread only: it reports through the callbacks immediately.
     func importLyrics(_ text: String) {
