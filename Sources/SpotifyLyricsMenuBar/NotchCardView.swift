@@ -64,8 +64,30 @@ final class NotchCardView: NSView {
         let lines: [String]
     }
 
+    /// Set while the card is pinned: the transport row is the reward for
+    /// pinning and is never shown for a mere hover.
+    var showsTransport = false {
+        didSet {
+            guard oldValue != showsTransport else { return }
+            updateLayout()
+            needsDisplay = true
+        }
+    }
+
+    /// The playback state the buttons render, so play/pause follows the player.
+    var playback: PlaybackState = .none {
+        didSet {
+            guard oldValue != playback else { return }
+            needsDisplay = true
+        }
+    }
+
     private var rowLayout: [Row] = []
     private var artworkRect: NSRect = .zero
+    /// Transport targets, laid out once with the rows: the single place a click
+    /// is matched to a button.
+    private var transportLayout: [(command: TransportCommand, rect: NSRect)] = []
+    private var transportRowRect: NSRect = .zero
 
     var onHoverChanged: ((Bool) -> Void)?
     var onClick: ((NSPoint) -> Void)?
@@ -180,6 +202,24 @@ final class NotchCardView: NSView {
             width: NotchStyle.artworkSize,
             height: NotchStyle.artworkSize
         )
+
+        transportLayout = []
+        transportRowRect = .zero
+        guard showsTransport else { return }
+        let rowRect = NSRect(x: 0, y: bottom, width: bounds.width, height: NotchStyle.transportRowHeight)
+        transportRowRect = rowRect
+        let target = NotchStyle.transportButtonSize
+        let stride = target + NotchStyle.transportGap
+        let firstX = bounds.midX - NotchStyle.transportWidth / 2
+        let commands: [TransportCommand] = [.previous, .playPause, .next]
+        transportLayout = commands.enumerated().map { index, command in
+            (command, NSRect(
+                x: firstX + CGFloat(index) * stride,
+                y: rowRect.midY - target / 2,
+                width: target,
+                height: target
+            ))
+        }
     }
 
     /// Slot under a card-space point, or nil for a miss: padding, the artwork,
@@ -193,6 +233,18 @@ final class NotchCardView: NSView {
     func line(at slot: Int) -> LyricLine? {
         let rows = windowRows
         return rows.indices.contains(slot) ? rows[slot] : nil
+    }
+
+    /// The button under a point, matched against the laid-out targets.
+    func transportCommand(at point: NSPoint) -> TransportCommand? {
+        guard isExpanded, showsTransport else { return nil }
+        return transportLayout.first { $0.rect.contains(point) }?.command
+    }
+
+    /// True anywhere inside the transport band, including the gaps between the
+    /// targets. A click there must do nothing at all — not pin, not seek.
+    func isInTransportRow(_ point: NSPoint) -> Bool {
+        isExpanded && showsTransport && transportRowRect.contains(point)
     }
 
     // MARK: - Drawing
@@ -278,6 +330,31 @@ final class NotchCardView: NSView {
             } else {
                 drawLine(row.lines[0], in: row.rect, isCurrent: false)
             }
+        }
+        drawTransport()
+    }
+
+    private func drawTransport() {
+        guard showsTransport else { return }
+        let config = NSImage.SymbolConfiguration(pointSize: NotchStyle.transportGlyphSize, weight: .medium)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [NotchStyle.transportColor]))
+        for (command, rect) in transportLayout {
+            guard let symbol = NSImage(
+                systemSymbolName: NotchStyle.transportSymbol(command, playback: playback),
+                accessibilityDescription: nil
+            )?.withSymbolConfiguration(config) else { continue }
+            let size = symbol.size
+            symbol.draw(
+                in: NSRect(
+                    x: rect.midX - size.width / 2,
+                    y: rect.midY - size.height / 2,
+                    width: size.width,
+                    height: size.height
+                ),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1
+            )
         }
     }
 

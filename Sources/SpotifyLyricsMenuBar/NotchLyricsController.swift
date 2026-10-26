@@ -145,6 +145,8 @@ final class NotchLyricsController: NSObject {
         currentPresence = target
 
         card.isExpanded = target == .expanded
+        card.showsTransport = isPinned
+        card.playback = presentation.playback
         if let geometry {
             card.isSimulated = geometry.isSimulated
             card.contentTop = NotchStyle.contentTop(for: geometry)
@@ -183,7 +185,11 @@ final class NotchLyricsController: NSObject {
         let size: NSSize
         switch presence {
         case .expanded:
-            size = NotchStyle.expandedSize(for: geometry, currentLine: currentLine)
+            size = NotchStyle.expandedSize(
+                for: geometry,
+                currentLine: currentLine,
+                showsTransport: isPinned
+            )
         case .collapsed:
             size = NotchStyle.collapsedSize(for: geometry, text: currentLine)
         case .dot:
@@ -280,6 +286,14 @@ final class NotchLyricsController: NSObject {
         guard panel.isVisible else { return }
         if currentPresence == .dot {
             requestMenu(at: point)
+            return
+        }
+        // The transport band owns every click inside it, including its gaps: a
+        // near-miss must do nothing rather than pin or seek.
+        if currentPresence == .expanded, card.isInTransportRow(point) {
+            if let command = card.transportCommand(at: point) {
+                onTransport?(command)
+            }
             return
         }
         guard currentPresence == .expanded,
