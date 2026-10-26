@@ -185,8 +185,8 @@ func snapshot(_ name: String, geometry: NotchGeometry) {
         return
     }
     do {
-        try png.write(to: outputDirectory.appendingPathComponent("T10-\(name).png"))
-        print("wrote T10-\(name).png (\(Int(cardImage.size.width))×\(Int(cardImage.size.height)) card)")
+        try png.write(to: outputDirectory.appendingPathComponent("T16-\(name).png"))
+        print("wrote T16-\(name).png (\(Int(cardImage.size.width))×\(Int(cardImage.size.height)) card)")
     } catch {
         check(false, "could not write \(name): \(error.localizedDescription)")
     }
@@ -360,9 +360,159 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     check(!panel().isVisible, "\(variant): dismiss stops rendering")
 }
 
+/// Row rects are private, so the harness probes them the way a click does: walk
+/// the card downwards in 1 pt steps and record which slot each y reports.
+func probeRows() -> [(y: CGFloat, slot: Int?)] {
+    var probes: [(CGFloat, Int?)] = []
+    var y: CGFloat = 0
+    while y <= card().bounds.height {
+        probes.append((y, cardView().slot(at: NSPoint(x: card().bounds.midX, y: y))))
+        y += 1
+    }
+    return probes
+}
+
+func cardView() -> NotchCardView {
+    guard let view = card() as? NotchCardView else {
+        print("FAIL: panel content is not a NotchCardView")
+        exit(1)
+    }
+    return view
+}
+
+/// The current row must wrap, never ellipsize; context rows stay one line.
+func checkWrapping(_ variant: String, geometry: NotchGeometry) {
+    let longText = "Sisa dunia seakan berputar ke arah yang sebaliknya dan aku terdiam"   // 458 pt: 2 rows
+    let hugeText = "Sisa dunia seakan berputar ke arah yang sebaliknya tanpa henti dan tanpa arah yang jelas sama sekali sampai lupa waktu"
+
+    func presentation(current: String) -> LyricsPresentation {
+        var window = LyricsWindow.around(lyrics, at: 35)
+        var lines = window.lines
+        if let index = lines.firstIndex(where: { $0?.timestamp == 30 }) {
+            lines[index] = LyricLine(timestamp: 30, text: current)
+        }
+        window = LyricsWindow(lines: lines, currentIndex: window.currentIndex)
+        return LyricsPresentation(window: window, isTimingExact: true, trackKey: "preview", playback: .playing)
+    }
+    let column = NotchStyle.textColumnWidth(for: NotchStyle.maxWidth)
+    print("[\(variant)] text column \(Int(column)) pt, card width \(Int(NotchStyle.maxWidth)) pt")
+    check(NotchStyle.maxWidth == 460, "\(variant): expanded card is 460 pt wide")
+    check(NotchStyle.collapsedMaxWidth == 420, "\(variant): the collapsed pill still caps at 420 pt")
+
+    // (a) two rows, no ellipsis anywhere.
+    let two = NotchText.wrapped(longText, font: NotchStyle.currentFont, to: column, maxRows: 2)
+    for (index, row) in two.enumerated() {
+        print("[\(variant)]   row \(index + 1): \"\(row)\" (\(Int(NotchText.width(of: row, font: NotchStyle.currentFont))) pt)")
+    }
+    check(two.count == 2, "\(variant): the long current line wraps to 2 rows")
+    check(!two.contains { $0.contains("…") }, "\(variant): the wrapped current line has no ellipsis")
+    check(
+        two.joined(separator: " ") == longText,
+        "\(variant): the 2 rows lose no characters"
+    )
+    check(two.allSatisfy { NotchText.width(of: $0, font: NotchStyle.currentFont) <= column }, "\(variant): both rows fit the column")
+
+    // The card grows by exactly one row relative to a one-line current line.
+    let oneRowHeight = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters").height
+    let twoRowsHeight = NotchStyle.expandedSize(for: geometry, currentLine: longText).height
+    check(
+        abs((twoRowsHeight - oneRowHeight) - (NotchStyle.lineHeight + NotchStyle.wrappedLineSpacing)) < 0.5,
+        "\(variant): the card grows by exactly one wrapped row (\(Int(oneRowHeight)) -> \(Int(twoRowsHeight)) pt)"
+    )
+
+    controller.dismiss()
+    controller.present(presentation(current: longText), geometry: geometry, isObscured: false)
+    wait(0.2)
+    controller.setHovered(true)
+    wait(0.5)
+    check(
+        abs(panel().frame.height - twoRowsHeight) < 0.5,
+        "\(variant): the window matches the wrapped height (\(Int(panel().frame.height)) pt)"
+    )
+    snapshot("\(variant)-wrapped-two-rows", geometry: geometry)
+
+    // (c) hit testing against the wrapped layout.
+    let probes = probeRows()
+    let slots = probes.compactMap { $0.slot }
+    check(Set(slots) == Set(0...(NotchStyle.rowRadius * 2)), "\(variant): every slot is clickable")
+    check(slots.contains(NotchStyle.rowRadius), "\(variant): the current row is clickable")
+
+    // Each row's vertical run maps to its own slot, in order, and no slot's run
+    // is interrupted by another slot.
+    func runs() -> [(slot: Int, from: CGFloat, to: CGFloat)] {
+        var result: [(Int, CGFloat, CGFloat)] = []
+        for probe in probes {
+            guard let slot = probe.slot else { continue }
+            if let last = result.last, last.0 == slot {
+                result[result.count - 1].2 = probe.y
+            } else {
+                result.append((slot, probe.y, probe.y))
+            }
+        }
+        return result
+    }
+    let rowRuns = runs()
+    for run in rowRuns {
+        print("[\(variant)]   slot \(run.slot): y \(Int(run.from))-\(Int(run.to))")
+    }
+    check(rowRuns.map(\.slot) == Array(0...(NotchStyle.rowRadius * 2)), "\(variant): rows map to slots in order")
+    check(
+        rowRuns.first { $0.slot == NotchStyle.rowRadius }.map { $0.to - $0.from + 1 } ?? 0 > NotchStyle.lineHeight + 5,
+        "\(variant): the current row's clickable run is taller than one line"
+    )
+    let gaps = probes.filter { $0.slot == nil }.count
+    check(gaps > 0, "\(variant): the gaps between rows are misses (\(gaps) pt of \(Int(card().bounds.height)))")
+
+    // A click in the middle of the current row seeks nothing and pins instead.
+    if let currentRun = rowRuns.first(where: { $0.slot == NotchStyle.rowRadius }) {
+        let before = seeks.count
+        let pinnedBefore = controller.isPinned
+        controller.click(at: NSPoint(x: card().bounds.midX, y: (currentRun.from + currentRun.to) / 2))
+        check(seeks.count == before, "\(variant): clicking the current row does not seek")
+        check(controller.isPinned != pinnedBefore, "\(variant): clicking the current row pins")
+        controller.click(at: NSPoint(x: card().bounds.midX, y: (currentRun.from + currentRun.to) / 2))
+        check(controller.isPinned == pinnedBefore, "\(variant): clicking it again unpins")
+    }
+
+    // (b) three rows needed: the second row is ellipsized, never a third line.
+    let three = NotchText.wrapped(hugeText, font: NotchStyle.currentFont, to: column, maxRows: 2)
+    for (index, row) in three.enumerated() {
+        print("[\(variant)]   fallback row \(index + 1): \"\(row)\"")
+    }
+    check(three.count == 2, "\(variant): a too-long line stays at 2 rows")
+    check(three.last?.hasSuffix("…") == true, "\(variant): the second row is the ellipsized fallback")
+    check(
+        NotchStyle.currentLineCount(hugeText) == 2,
+        "\(variant): the height math also stops at 2 rows"
+    )
+    // From a clean expanded state, so the grace timer from the pin toggles above
+    // cannot leave the card collapsed while it is being measured.
+    controller.dismiss()
+    controller.present(presentation(current: hugeText), geometry: geometry, isObscured: false)
+    wait(0.15)
+    controller.setHovered(true)
+    wait(0.5)
+    check(
+        abs(panel().frame.height - twoRowsHeight) < 0.5,
+        "\(variant): the fallback keeps the same height (no third line)"
+    )
+    snapshot("\(variant)-wrapped-fallback", geometry: geometry)
+
+    // Context rows keep one line with a tail ellipsis.
+    let context = NotchText.fitted(hugeText, font: NotchStyle.lineFont, to: column)
+    check(
+        NotchText.width(of: context, font: NotchStyle.lineFont) <= column && context.hasSuffix("…"),
+        "\(variant): a context row is one ellipsized line"
+    )
+    controller.dismiss()
+    seeks.removeAll()
+}
+
 checkPolicy()
 renderSequence("simulated", geometry: syntheticGeometry(simulated: true))
 renderSequence("hardware", geometry: syntheticGeometry(simulated: false))
+checkWrapping("simulated", geometry: syntheticGeometry(simulated: true))
+checkWrapping("hardware", geometry: syntheticGeometry(simulated: false))
 
 print(failures == 0 ? "PASS: all checks passed" : "FAIL: \(failures) check(s) failed")
 exit(failures == 0 ? 0 : 1)
