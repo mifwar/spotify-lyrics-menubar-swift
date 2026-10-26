@@ -1,300 +1,81 @@
 import Cocoa
 import Foundation
 
-private let maxChars = 70
-private let pollInterval: TimeInterval = 0.4
-private let trackCheckInterval: TimeInterval = 2.0
-private let lyricsRefetchInterval: TimeInterval = 20.0
-private let minStatusItemWidth: CGFloat = 72
-private let maxStatusItemWidth: CGFloat = 360
-private let statusItemHorizontalPadding: CGFloat = 24
-// ponytail: caps how long a split line's timing is stretched, so a long
-// instrumental gap after a line doesn't hold the first half on screen.
-private let maxSplitLineDuration: TimeInterval = 8
-private let lyricsPanelWidth: CGFloat = 480
-private let lyricsPanelMinHeight: CGFloat = 84
-private let lyricsPanelVerticalPadding: CGFloat = 24
-private let lyricsPanelLineHeight: CGFloat = 19
-private let lyricsPanelLineSpacing: CGFloat = 4
-private let placeholder = "♪ Lyrics"
-private let loadingPlaceholder = "♪···"
-private let floatingPlaceholder = "♪"
 private let displayModeDefaultsKey = "lyricsDisplayMode"
-private let userAgent = "SpotifyLyricsMenuBarSwift/1.0 (personal use)"
-private let maxLyricsMatchScore = 5_000.0
-private let lyricsCacheFilename = "lyrics-cache.json"
-private let lrclibSearchBaseURL = "https://lrclib.net/search/"
+private let notchDisplayDefaultsKey = "notchDisplayID"
+private let showOverFullscreenDefaultsKey = "showOverFullscreenApps"
 
 private enum LyricsDisplayMode: String {
     case menuBar
     case floating
+    case notch
 }
 
-/// Last rendered presentation, replayed when the display mode changes.
-/// Main thread only.
-private struct LyricsPresentation {
-    var menuBarTitle = placeholder
-    var floatingLines: [(text: String, isCurrent: Bool)]?
-    var isPlaceholder = false
-}
-
-private struct SpotifyState {
-    let track: String
-    let artist: String
-    let position: TimeInterval
-    let duration: TimeInterval
-    let id: String
-    let playing: Bool
-}
-
-private struct LyricLine {
-    let timestamp: TimeInterval
-    let text: String
-}
-
-private struct LyricsLookup {
-    let track: String
-    let artist: String
-    let duration: TimeInterval
-    let cacheKey: String
-}
-
-private struct LRCLibResponse: Codable {
-    let trackName: String?
-    let artistName: String?
-    let syncedLyrics: String?
-    let plainLyrics: String?
-    let duration: Double?
-}
-
-private struct CachedLyrics: Codable {
-    let response: LRCLibResponse
-    let cachedAt: Date
-    let offset: Double
-
-    init(response: LRCLibResponse, cachedAt: Date, offset: Double = 0) {
-        self.response = response
-        self.cachedAt = cachedAt
-        self.offset = offset
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        response = try container.decode(LRCLibResponse.self, forKey: .response)
-        cachedAt = try container.decode(Date.self, forKey: .cachedAt)
-        offset = try container.decodeIfPresent(Double.self, forKey: .offset) ?? 0
-    }
-}
-
-private final class LyricsCache {
-    private let queue = DispatchQueue(label: "SpotifyLyricsMenuBar.lyricsCache")
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
-    private let fileURL: URL?
-    private var entries: [String: CachedLyrics] = [:]
-
-    init() {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("SpotifyLyricsMenuBar", isDirectory: true)
-        self.fileURL = directory?.appendingPathComponent(lyricsCacheFilename)
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-
-        guard let directory, let fileURL else { return }
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        entries = (try? decoder.decode([String: CachedLyrics].self, from: data)) ?? [:]
-        if !entries.isEmpty {
-            save()
-        }
-    }
-
-    func response(for key: String) -> LRCLibResponse? {
-        queue.sync {
-            entries[key]?.response
-        }
-    }
-
-    func response(track: String, artist: String, duration: TimeInterval) -> LRCLibResponse? {
-        queue.sync {
-            let prefix = "\(track.lowercased())|\(artist.lowercased())|"
-            return entries
-                .compactMap { key, entry -> (LRCLibResponse, Double)? in
-                    guard key.hasPrefix(prefix),
-                          let cachedDuration = Double(key.dropFirst(prefix.count))
-                    else {
-                        return nil
-                    }
-                    return (entry.response, abs(cachedDuration - duration.rounded()))
-                }
-                .min(by: { $0.1 < $1.1 })?
-                .0
-        }
-    }
-
-    func store(_ response: LRCLibResponse, for key: String) {
-        queue.sync {
-            let offset = entries[key]?.offset ?? 0
-            entries[key] = CachedLyrics(response: response, cachedAt: Date(), offset: offset)
-            save()
-        }
-    }
-
-    func offset(for key: String) -> Double {
-        queue.sync {
-            entries[key]?.offset ?? 0
-        }
-    }
-
-    func storeOffset(_ offset: Double, for key: String) {
-        queue.sync {
-            guard let entry = entries[key] else { return }
-            entries[key] = CachedLyrics(response: entry.response, cachedAt: entry.cachedAt, offset: offset)
-            save()
-        }
-    }
-
-    private func save() {
-        guard let fileURL, let data = try? encoder.encode(entries) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-    }
-}
-
-private final class LyricsPanelViewController: NSViewController {
-    private var labels: [NSTextField] = []
-
-    override func loadView() {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 4
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(stack)
-
-        for _ in 0..<7 {
-            let label = NSTextField(labelWithString: "")
-            label.alignment = .center
-            label.font = NSFont.systemFont(ofSize: 13)
-            label.textColor = .secondaryLabelColor
-            labels.append(label)
-            stack.addArrangedSubview(label)
-        }
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
-            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 480),
-        ])
-
-        self.view = container
-    }
-
-    func update(lines: [(text: String, isCurrent: Bool)]) {
-        var visibleCount = 0
-        for (i, line) in lines.enumerated() {
-            guard i < labels.count else { break }
-            if line.text.isEmpty {
-                labels[i].isHidden = true
-            } else {
-                visibleCount += 1
-                labels[i].isHidden = false
-                labels[i].stringValue = line.text
-                if line.isCurrent {
-                    labels[i].font = NSFont.boldSystemFont(ofSize: 14)
-                    labels[i].textColor = .labelColor
-                } else {
-                    labels[i].font = NSFont.systemFont(ofSize: 13)
-                    labels[i].textColor = .secondaryLabelColor
-                }
-            }
-        }
-
-        let spacing = max(0, CGFloat(visibleCount - 1)) * lyricsPanelLineSpacing
-        let height = max(lyricsPanelMinHeight, lyricsPanelVerticalPadding + CGFloat(visibleCount) * lyricsPanelLineHeight + spacing)
-        preferredContentSize = NSSize(width: lyricsPanelWidth, height: height)
-    }
-}
-
-private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let nowPlayingItem = NSMenuItem(title: "Now Playing: -", action: nil, keyEquivalent: "")
     private let offsetItem = NSMenuItem(title: "Offset: 0.0s", action: nil, keyEquivalent: "")
     private let plainLyricsItem = NSMenuItem(title: "Use Plain Lyrics", action: #selector(togglePlainLyrics), keyEquivalent: "p")
     private let menuBarModeItem = NSMenuItem(title: "Menu Bar", action: #selector(selectDisplayMode(_:)), keyEquivalent: "")
     private let floatingModeItem = NSMenuItem(title: "Floating", action: #selector(selectDisplayMode(_:)), keyEquivalent: "")
+    private let notchModeItem = NSMenuItem(title: "Notch", action: #selector(selectDisplayMode(_:)), keyEquivalent: "")
+    private let displayMenuItem = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+    private let showOverFullscreenItem = NSMenuItem(title: "Show over Fullscreen Apps", action: #selector(toggleShowOverFullscreenApps), keyEquivalent: "")
     private lazy var floatingPanelController = FloatingLyricsPanelController()
-    private var presentation = LyricsPresentation()
-    private let stateQueue = DispatchQueue(label: "SpotifyLyricsMenuBar.state")
-    private let appleScriptQueue = DispatchQueue(label: "SpotifyLyricsMenuBar.appleScript")
-
-    private var currentTrackID: String?
-    private var currentLyricsCacheKey: String?
-    private var lyrics: [LyricLine] = []
-    private var lastDisplayed = ""
-    private var lyricOffset: TimeInterval = 0
-    private var forcePlainLyrics = false
-    private var shouldBypassLyricsCache = false
-    private var lastLyricsFetchAttempt: Date?
-    private var lyricsFetchToken = UUID()
-    private var currentStatusTitle = placeholder
-    private var trackTimer: Timer?
-    private var lyricTimer: Timer?
-
-    private let checkRunningScript: NSAppleScript
-    private let fetchStateScript: NSAppleScript
+    private lazy var notchController = NotchLyricsController()
+    private let spotifyClient = SpotifyClient()
     private let lyricsCache = LyricsCache()
-    private let decoder = JSONDecoder()
-    private lazy var ephemeralSession: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.urlCache = nil
-        return URLSession(configuration: config)
+    private lazy var lrclibClient = LRCLibClient(cache: lyricsCache)
+    /// Cached window-server answer: only a mode, display, checkbox or space
+    /// change can alter it, not a lyric tick.
+    private var isFullscreenBlocking = false
+    /// Last rendered presentation, replayed when the display mode changes.
+    /// Main thread only.
+    private var presentation = LyricsPresentation()
+    private var currentStatusTitle = placeholder
+
+    private lazy var engine: LyricsEngine = {
+        let engine = LyricsEngine(client: spotifyClient, lrclib: lrclibClient, cache: lyricsCache)
+        engine.onPresentation = { [weak self] presentation in
+            self?.apply(presentation)
+        }
+        engine.onTrackChanged = { [weak self] state in
+            self?.nowPlayingItem.title = state.map { "♪ \($0.track) — \($0.artist)" } ?? "Now Playing: -"
+        }
+        engine.onOffsetChanged = { [weak self] in
+            self?.updateOffsetMenuItem()
+        }
+        engine.onPlainLyricsChanged = { [weak self] in
+            self?.updatePlainLyricsMenuItem()
+        }
+        engine.onTrackCleared = { [weak self] in
+            self?.popover.performClose(nil)
+        }
+        return engine
     }()
 
     private let popover = NSPopover()
     private let lyricsPanelVC = LyricsPanelViewController()
     private var statusMenu: NSMenu!
 
-    override init() {
-        let checkSource = "application \"Spotify\" is running"
-        let fetchSource = """
-        tell application "Spotify"
-            if player state is playing or player state is paused then
-                set t to name of current track
-                set a to artist of current track
-                set p to player position
-                set d to (duration of current track) / 1000
-                set i to id of current track
-                set s to player state as string
-                return t & "||" & a & "||" & p & "||" & d & "||" & i & "||" & s
-            else
-                return ""
-            end if
-        end tell
-        """
-
-        self.checkRunningScript = NSAppleScript(source: checkSource)!
-        self.fetchStateScript = NSAppleScript(source: fetchSource)!
-
-        super.init()
-
-        appleScriptQueue.sync {
-            var error: NSDictionary?
-            _ = self.checkRunningScript.executeAndReturnError(&error)
-            _ = self.fetchStateScript.executeAndReturnError(&error)
-        }
-    }
-
     private var displayMode: LyricsDisplayMode {
         LyricsDisplayMode(rawValue: UserDefaults.standard.string(forKey: displayModeDefaultsKey) ?? "") ?? .menuBar
+    }
+
+    private var notchDisplayOverride: String? {
+        UserDefaults.standard.string(forKey: notchDisplayDefaultsKey)
+    }
+
+    private var showOverFullscreenApps: Bool {
+        UserDefaults.standard.bool(forKey: showOverFullscreenDefaultsKey)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        presentStatus(title: placeholder, floatingLines: nil)
+        // Before the first render: launching in notch mode with a fullscreen app
+        // in front must not flash the pill on.
+        refresh()
         configureStatusButton()
 
         lyricsPanelVC.preferredContentSize = NSSize(width: lyricsPanelWidth, height: lyricsPanelMinHeight)
@@ -323,10 +104,19 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         menuBarModeItem.representedObject = LyricsDisplayMode.menuBar.rawValue
         floatingModeItem.target = self
         floatingModeItem.representedObject = LyricsDisplayMode.floating.rawValue
+        notchModeItem.target = self
+        notchModeItem.representedObject = LyricsDisplayMode.notch.rawValue
         displayModeSubmenu.addItem(menuBarModeItem)
         displayModeSubmenu.addItem(floatingModeItem)
+        displayModeSubmenu.addItem(notchModeItem)
         displayModeItem.submenu = displayModeSubmenu
         menu.addItem(displayModeItem)
+        // Only meaningful for the notch surface, so hidden in the other modes;
+        // the submenu is rebuilt whenever the menu state refreshes.
+        displayMenuItem.submenu = NSMenu()
+        menu.addItem(displayMenuItem)
+        showOverFullscreenItem.target = self
+        menu.addItem(showOverFullscreenItem)
         menu.addItem(.separator())
         menu.addItem(offsetItem)
         menu.addItem(menuItem(title: "Lyrics Later (-0.5s)", action: #selector(decreaseOffset), keyEquivalent: "["))
@@ -335,19 +125,35 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         menu.addItem(.separator())
         menu.addItem(menuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         self.statusMenu = menu
+        menu.delegate = self
         plainLyricsItem.target = self
         updateOffsetMenuItem()
         updatePlainLyricsMenuItem()
-        updateDisplayModeMenuItems()
+        refreshMenuState()
 
-        trackTimer = Timer.scheduledTimer(withTimeInterval: trackCheckInterval, repeats: true) { [weak self] _ in
-            self?.checkTrack()
+        // The pill is a surface like the others: it reports intent, the app
+        // delegate decides. Nothing in it touches the engine directly.
+        notchController.onSeek = { [weak self] timestamp in
+            self?.engine.seek(to: timestamp)
         }
-        lyricTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-            self?.updateLyric()
+        notchController.onMenuRequest = { [weak self] screenPoint in
+            self?.showStatusMenu(at: screenPoint)
         }
+        // Fullscreen, screen arrangement and app switches change the answer to
+        // "is the pill obscured" without any lyric update.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.activeSpaceDidChangeNotification,
+                     NSWorkspace.didActivateApplicationNotification] {
+            workspaceCenter.addObserver(self, selector: #selector(surfaceEnvironmentChanged), name: name, object: nil)
+        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(surfaceEnvironmentChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
 
-        checkTrack()
+        engine.start()
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -368,10 +174,8 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         } else if let button = statusItem.button {
             statusItem.length = button.bounds.width
             showPopover(relativeTo: button)
-            let snapshot = stateQueue.sync { (lyrics, lyricOffset) }
-            if let state = getSpotifyState(), !snapshot.0.isEmpty {
-                let lines = panelLines(at: state.position + snapshot.1, in: snapshot.0)
-                updateLyricsPanel(lines: lines)
+            if let window = engine.freshWindow() {
+                updateLyricsPanel(window)
             }
         }
     }
@@ -384,8 +188,8 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         }
     }
 
-    private func updateLyricsPanel(lines: [(text: String, isCurrent: Bool)]) {
-        lyricsPanelVC.update(lines: lines)
+    private func updateLyricsPanel(_ window: LyricsWindow) {
+        lyricsPanelVC.update(window)
         popover.contentSize = lyricsPanelVC.preferredContentSize
     }
 
@@ -399,8 +203,8 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
 
     private func updateStatusItemLength() {
         let font = statusItem.button?.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let width = ceil((currentStatusTitle as NSString).size(withAttributes: [.font: font]).width + statusItemHorizontalPadding)
-        statusItem.length = min(max(width, minStatusItemWidth), maxStatusItemWidth)
+        let width = ceil((currentStatusTitle as NSString).size(withAttributes: [.font: font]).width + StatusItemTitle.horizontalPadding)
+        statusItem.length = min(max(width, StatusItemTitle.minWidth), StatusItemTitle.maxWidth)
     }
 
     private func showPopover(relativeTo button: NSStatusBarButton) {
@@ -419,19 +223,12 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
     }
 
     @objc private func forceRefresh() {
-        stateQueue.sync {
-            currentTrackID = nil
-            shouldBypassLyricsCache = true
-        }
-        checkTrack()
+        engine.refresh()
     }
 
     @objc private func openLRCLibSearch() {
-        guard let state = getSpotifyState() else { return }
-        let lookup = lyricsLookup(track: state.track, artist: state.artist, duration: state.duration)
-        let query = lookup.track.isEmpty ? state.track : lookup.track
-        guard let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: lrclibSearchBaseURL + encodedQuery)
+        guard let state = spotifyClient.currentState(),
+              let url = lrclibClient.searchPageURL(track: state.track, artist: state.artist, duration: state.duration)
         else {
             return
         }
@@ -439,687 +236,190 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
     }
 
     @objc private func importLyricsFromClipboard() {
-        guard let state = getSpotifyState(),
-              let pasted = NSPasteboard.general.string(forType: .string)
-        else {
-            return
-        }
-
-        let lookup = lyricsLookup(track: state.track, artist: state.artist, duration: state.duration)
-        let syncedLyrics = normalizedLRCText(pasted)
-        let response = LRCLibResponse(
-            trackName: lookup.track,
-            artistName: lookup.artist,
-            syncedLyrics: syncedLyrics,
-            plainLyrics: nil,
-            duration: lookup.duration
-        )
-        let importedLyrics = lyrics(from: response, duration: lookup.duration, forcePlain: false)
-        guard !importedLyrics.isEmpty else {
-            DispatchQueue.main.async {
-                self.presentStatus(title: "♪ (invalid lyrics)", floatingLines: [("Invalid clipboard lyrics", true)], isPlaceholder: true)
-                self.updateLyricsPanel(lines: [("", false), ("", false), ("", false), ("Invalid clipboard lyrics", true), ("", false), ("", false), ("", false)])
-            }
-            return
-        }
-
-        lyricsCache.store(response, for: lookup.cacheKey)
-        stateQueue.sync {
-            currentTrackID = state.id
-            currentLyricsCacheKey = lookup.cacheKey
-            lyrics = importedLyrics
-            lastDisplayed = ""
-            lyricOffset = storedLyricOffset(for: lookup.cacheKey)
-            forcePlainLyrics = false
-            shouldBypassLyricsCache = false
-            lastLyricsFetchAttempt = nil
-            lyricsFetchToken = UUID()
-        }
-        DispatchQueue.main.async {
-            self.nowPlayingItem.title = "♪ \(state.track) — \(state.artist)"
-            self.updatePlainLyricsMenuItem()
-            self.updateLyric()
-        }
+        guard let pasted = NSPasteboard.general.string(forType: .string) else { return }
+        engine.importLyrics(pasted)
     }
 
     @objc private func selectDisplayMode(_ sender: NSMenuItem) {
         guard let rawMode = sender.representedObject as? String,
-              LyricsDisplayMode(rawValue: rawMode) != nil
+              let mode = LyricsDisplayMode(rawValue: rawMode)
         else {
             return
         }
+        let wasNotch = displayMode == .notch
         UserDefaults.standard.set(rawMode, forKey: displayModeDefaultsKey)
-        updateDisplayModeMenuItems()
+        if wasNotch, mode != .notch {
+            // Leaving notch mode is the one case where the surface must stop
+            // rendering at all (it keeps pin and pause state otherwise).
+            notchController.dismiss()
+        }
+        refresh()
+    }
+
+    /// Re-evaluates everything a mode, screen, fullscreen or preference change
+    /// can affect, in the one order that is load-bearing: the menu reflects the
+    /// new state, the fullscreen answer is refreshed, and only then does the
+    /// active surface read it. Call this instead of the three steps by hand.
+    private func refresh() {
+        refreshMenuState()
+        refreshFullscreenState()
         renderPresentation()
     }
 
-    private func updateDisplayModeMenuItems() {
+    /// Everything in the menu that depends on mode, screens or the persisted
+    /// choices, in one place: built at launch and on mode changes, and refreshed
+    /// each time the menu opens (and before a programmatic pop-up from the pill).
+    private func refreshMenuState() {
         let mode = displayMode
         menuBarModeItem.state = mode == .menuBar ? .on : .off
         floatingModeItem.state = mode == .floating ? .on : .off
+        notchModeItem.state = mode == .notch ? .on : .off
+        showOverFullscreenItem.state = showOverFullscreenApps ? .on : .off
+        displayMenuItem.isHidden = mode != .notch
+        showOverFullscreenItem.isHidden = mode != .notch
+        rebuildDisplaySubmenu()
     }
 
     /// Single presentation path: every lyric/status update flows through here
     /// and is rendered to the menu bar title and/or the floating panel.
     /// Main thread only.
-    private func presentStatus(title: String, floatingLines: [(text: String, isCurrent: Bool)]?, isPlaceholder: Bool = false) {
-        presentation = LyricsPresentation(menuBarTitle: title, floatingLines: floatingLines, isPlaceholder: isPlaceholder)
+    private func apply(_ presentation: LyricsPresentation) {
+        self.presentation = presentation
         renderPresentation()
     }
 
     private func renderPresentation() {
+        // Only surfaces that are actually on screen are touched: the popover
+        // follows the song while it is open, and the pill is dismissed once when
+        // notch mode is left (see selectDisplayMode), not on every tick.
+        if popover.isShown, let window = presentation.window {
+            updateLyricsPanel(window)
+        }
         switch displayMode {
         case .menuBar:
+            setStatusItemVisible(true)
             floatingPanelController.hide()
-            setStatusTitle(presentation.menuBarTitle)
+            setStatusTitle(StatusItemTitle.text(for: presentation))
         case .floating:
+            setStatusItemVisible(true)
             setStatusTitle(floatingPlaceholder)
-            if let lines = presentation.floatingLines {
-                floatingPanelController.update(lines: lines, isPlaceholder: presentation.isPlaceholder)
-            } else {
-                floatingPanelController.hide()
+            floatingPanelController.update(presentation)
+        case .notch:
+            floatingPanelController.hide()
+            if popover.isShown {
+                popover.performClose(nil)
             }
+            // The pill sits on the menu bar's centre, so the item gets out of
+            // its way; the same menu is reachable from the pill's right-click.
+            setStatusItemVisible(false)
+            refreshNotchSurface()
         }
+    }
+
+    private func setStatusItemVisible(_ visible: Bool) {
+        guard statusItem.isVisible != visible else { return }
+        statusItem.isVisible = visible
+        if visible {
+            updateStatusItemLength()
+        }
+    }
+
+    /// Everything the pill needs before it may show: notch mode and a display to
+    /// attach to. Being obscured by a fullscreen app is a separate input — it
+    /// hides the window without clearing pin, hover or pause state (T9 R4).
+    private func refreshNotchSurface() {
+        guard displayMode == .notch,
+              let screen = NotchDisplays.preferredScreen(override: notchDisplayOverride)
+        else {
+            notchController.dismiss()
+            return
+        }
+        notchController.present(
+            presentation,
+            geometry: NotchDisplays.geometry(for: screen),
+            isObscured: isFullscreenBlocking
+        )
+    }
+
+    /// Re-runs the one environment question that costs a window-server query.
+    /// Called on mode, display, checkbox and space/screen changes only.
+    private func refreshFullscreenState() {
+        guard displayMode == .notch,
+              !showOverFullscreenApps,
+              let screen = NotchDisplays.preferredScreen(override: notchDisplayOverride)
+        else {
+            isFullscreenBlocking = false
+            return
+        }
+        isFullscreenBlocking = FullscreenApps.isBlocking(screen: screen)
+    }
+
+    /// Right-click on the pill: the same menu the status item shows.
+    private func showStatusMenu(at screenPoint: NSPoint) {
+        statusMenu.popUp(positioning: nil, at: screenPoint, in: nil)
+    }
+
+    /// Displays come and go, so their list is rebuilt here; `menuWillOpen` and
+    /// every decision path call that.
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshMenuState()
+    }
+
+    private func rebuildDisplaySubmenu() {
+        let effectiveID = NotchDisplays.preferredScreen(override: notchDisplayOverride).map { NotchDisplays.id(of: $0) }
+        let submenu = NSMenu()
+        for screen in NSScreen.screens {
+            let id = NotchDisplays.id(of: screen)
+            let item = NSMenuItem(title: screen.localizedName, action: #selector(selectNotchDisplay(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            item.state = id == effectiveID ? .on : .off
+            submenu.addItem(item)
+        }
+        displayMenuItem.submenu = submenu
+    }
+
+    @objc private func selectNotchDisplay(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(id, forKey: notchDisplayDefaultsKey)
+        refresh()
+    }
+
+    @objc private func toggleShowOverFullscreenApps() {
+        UserDefaults.standard.set(!showOverFullscreenApps, forKey: showOverFullscreenDefaultsKey)
+        refresh()
+    }
+
+    @objc private func surfaceEnvironmentChanged() {
+        refresh()
     }
 
     @objc private func togglePlainLyrics() {
-        let shouldRefetch = stateQueue.sync {
-            forcePlainLyrics.toggle()
-            let should = currentTrackID != nil
-            if should {
-                lyrics = []
-                lastDisplayed = ""
-            }
-            return should
-        }
-        updatePlainLyricsMenuItem()
-        if shouldRefetch {
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                guard let self, let state = self.getSpotifyState() else { return }
-                let fetchToken = self.stateQueue.sync { () -> UUID in
-                    let token = UUID()
-                    self.lyricsFetchToken = token
-                    return token
-                }
-                let fetched = self.fetchLyrics(track: state.track, artist: state.artist, duration: state.duration)
-                let shouldApplyFetch = self.stateQueue.sync { () -> Bool in
-                    guard self.lyricsFetchToken == fetchToken else { return false }
-                    self.lyrics = fetched
-                    return true
-                }
-                guard shouldApplyFetch else { return }
-                DispatchQueue.main.async {
-                    self.updateLyric()
-                }
-            }
-        }
+        engine.togglePlainLyrics()
     }
 
     @objc private func decreaseOffset() {
-        adjustOffset(by: -0.5)
+        engine.adjustOffset(by: -0.5)
     }
 
     @objc private func increaseOffset() {
-        adjustOffset(by: 0.5)
+        engine.adjustOffset(by: 0.5)
     }
 
     @objc private func resetOffset() {
-        setOffset(0)
+        engine.setOffset(0)
+    }
+
+    private func updateOffsetMenuItem() {
+        offsetItem.title = String(format: "Offset: %+.1fs", engine.offset)
+    }
+
+    private func updatePlainLyricsMenuItem() {
+        plainLyricsItem.state = engine.isPlainLyrics ? .on : .off
     }
 
     @objc private func quit() {
         NSApp.terminate(nil)
-    }
-
-    private func adjustOffset(by delta: TimeInterval) {
-        let nextOffset = stateQueue.sync { lyricOffset + delta }
-        setOffset(nextOffset)
-    }
-
-    private func setOffset(_ offset: TimeInterval) {
-        let roundedOffset = (offset * 2).rounded() / 2
-        let cacheKey = stateQueue.sync { currentLyricsCacheKey }
-        stateQueue.sync {
-            lyricOffset = roundedOffset
-            lastDisplayed = ""
-        }
-        if let cacheKey {
-            storeLyricOffset(roundedOffset, for: cacheKey)
-        }
-        updateOffsetMenuItem()
-        updateLyric()
-    }
-
-    private func updateOffsetMenuItem() {
-        let offset = stateQueue.sync { lyricOffset }
-        offsetItem.title = String(format: "Offset: %+.1fs", offset)
-    }
-
-    private func storedLyricOffset(for cacheKey: String) -> TimeInterval {
-        let cachedOffset = lyricsCache.offset(for: cacheKey)
-        if cachedOffset != 0 {
-            return cachedOffset
-        }
-        let legacyOffsets = UserDefaults.standard.dictionary(forKey: "lyricOffsets") as? [String: Double]
-        guard let legacyOffset = legacyOffsets?[cacheKey] else { return 0 }
-        lyricsCache.storeOffset(legacyOffset, for: cacheKey)
-        return legacyOffset
-    }
-
-    private func storeLyricOffset(_ offset: TimeInterval, for cacheKey: String) {
-        lyricsCache.storeOffset(offset, for: cacheKey)
-    }
-
-    private func updatePlainLyricsMenuItem() {
-        let isPlain = stateQueue.sync { forcePlainLyrics }
-        plainLyricsItem.state = isPlain ? .on : .off
-    }
-
-    private func checkTrack() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            autoreleasepool {
-                guard let self else { return }
-
-                guard let state = self.getSpotifyState() else {
-                    self.stateQueue.sync {
-                        self.currentTrackID = nil
-                        self.currentLyricsCacheKey = nil
-                        self.lyrics = []
-                        self.lastDisplayed = ""
-                        self.lyricOffset = 0
-                        self.forcePlainLyrics = false
-                        self.shouldBypassLyricsCache = false
-                        self.lastLyricsFetchAttempt = nil
-                        self.lyricsFetchToken = UUID()
-                    }
-                    DispatchQueue.main.async {
-                        self.presentStatus(title: placeholder, floatingLines: nil)
-                        self.nowPlayingItem.title = "Now Playing: -"
-                        self.updateOffsetMenuItem()
-                        self.updatePlainLyricsMenuItem()
-                        self.popover.performClose(nil)
-                    }
-                    return
-                }
-
-                guard state.playing else { return }
-
-                let lookup = self.lyricsLookup(track: state.track, artist: state.artist, duration: state.duration)
-                let fetchInfo = self.stateQueue.sync { () -> (shouldFetch: Bool, isNewTrack: Bool, bypassCache: Bool, token: UUID) in
-                    let now = Date()
-
-                    if state.id != self.currentTrackID {
-                        let bypassCache = self.shouldBypassLyricsCache
-                        let token = UUID()
-                        self.currentTrackID = state.id
-                        self.currentLyricsCacheKey = lookup.cacheKey
-                        self.lyrics = []
-                        self.lastDisplayed = ""
-                        self.lyricOffset = self.storedLyricOffset(for: lookup.cacheKey)
-                        self.forcePlainLyrics = false
-                        self.shouldBypassLyricsCache = false
-                        self.lastLyricsFetchAttempt = now
-                        self.lyricsFetchToken = token
-                        return (true, true, bypassCache, token)
-                    }
-
-                    guard self.lyrics.isEmpty else {
-                        return (false, false, false, self.lyricsFetchToken)
-                    }
-
-                    if let lastAttempt = self.lastLyricsFetchAttempt,
-                       now.timeIntervalSince(lastAttempt) < lyricsRefetchInterval {
-                        return (false, false, false, self.lyricsFetchToken)
-                    }
-
-                    let token = UUID()
-                    self.lastDisplayed = ""
-                    self.lastLyricsFetchAttempt = now
-                    self.lyricsFetchToken = token
-                    return (true, false, true, token)
-                }
-                guard fetchInfo.shouldFetch else { return }
-
-                DispatchQueue.main.async {
-                    self.nowPlayingItem.title = "♪ \(state.track) — \(state.artist)"
-                    self.presentStatus(title: loadingPlaceholder, floatingLines: [("Loading lyrics…", true)], isPlaceholder: true)
-                    if fetchInfo.isNewTrack {
-                        self.updateOffsetMenuItem()
-                        self.updatePlainLyricsMenuItem()
-                    }
-                    self.updateLyricsPanel(lines: [("", false), ("", false), ("", false), ("Loading...", true), ("", false), ("", false), ("", false)])
-                }
-
-                let fetchedLyrics = self.fetchLyrics(
-                    track: state.track,
-                    artist: state.artist,
-                    duration: state.duration,
-                    bypassCache: fetchInfo.bypassCache
-                )
-                let shouldApplyFetch = self.stateQueue.sync { () -> Bool in
-                    guard self.lyricsFetchToken == fetchInfo.token else { return false }
-                    self.lyrics = fetchedLyrics
-                    return true
-                }
-                guard shouldApplyFetch else { return }
-                DispatchQueue.main.async {
-                    self.updateLyric()
-                }
-
-                if fetchedLyrics.isEmpty {
-                    DispatchQueue.main.async {
-                        self.presentStatus(title: "♪ (no lyrics found)", floatingLines: [("No lyrics found", true)], isPlaceholder: true)
-                        self.updateLyricsPanel(lines: [("", false), ("", false), ("", false), ("(no lyrics)", true), ("", false), ("", false), ("", false)])
-                    }
-                }
-            }
-        }
-    }
-
-    private func updateLyric() {
-        let hasTrack = stateQueue.sync { currentTrackID != nil && !lyrics.isEmpty }
-        guard hasTrack else { return }
-
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            autoreleasepool {
-                guard let self else { return }
-
-                let snapshot = self.stateQueue.sync { (self.currentTrackID, self.lyrics, self.lastDisplayed, self.lyricOffset) }
-                guard snapshot.0 != nil, !snapshot.1.isEmpty else { return }
-                guard let state = self.getSpotifyState(), state.playing else { return }
-
-                let adjustedPosition = state.position + snapshot.3
-                var currentLine = ""
-                var lineStart = snapshot.1[0].timestamp
-                var lineEnd = state.duration
-                for lyric in snapshot.1 {
-                    if lyric.timestamp <= adjustedPosition {
-                        currentLine = lyric.text
-                        lineStart = lyric.timestamp
-                    } else {
-                        lineEnd = lyric.timestamp
-                        break
-                    }
-                }
-                if currentLine.isEmpty, let first = snapshot.1.first {
-                    currentLine = first.text
-                    lineEnd = snapshot.1.count > 1 ? snapshot.1[1].timestamp : state.duration
-                }
-
-                // Too wide for the menu bar: show it as two halves in sequence,
-                // switching part-way through the line in proportion to their length.
-                var menuBarLine = currentLine
-                if !Self.fitsStatusItem(currentLine), let (first, second) = Self.splitInTwo(currentLine) {
-                    let duration = min(max(lineEnd - lineStart, 0), maxSplitLineDuration)
-                    let switchAt = lineStart + duration * Double(first.count) / Double(currentLine.count)
-                    menuBarLine = adjustedPosition < switchAt ? first : second
-                }
-
-                let panelLines = self.panelLines(at: adjustedPosition, in: snapshot.1)
-
-                guard menuBarLine != snapshot.2 else {
-                    DispatchQueue.main.async {
-                        self.updateLyricsPanel(lines: panelLines)
-                    }
-                    return
-                }
-
-                let displayed = Self.truncated(menuBarLine)
-                self.stateQueue.sync {
-                    self.lastDisplayed = menuBarLine
-                }
-                DispatchQueue.main.async {
-                    self.presentStatus(title: displayed, floatingLines: panelLines)
-                    self.updateLyricsPanel(lines: panelLines)
-                }
-            }
-        }
-    }
-
-    private func panelLines(at position: TimeInterval, in lyrics: [LyricLine]) -> [(text: String, isCurrent: Bool)] {
-        var currentIdx = -1
-        for (i, lyric) in lyrics.enumerated() {
-            if lyric.timestamp <= position {
-                currentIdx = i
-            } else {
-                break
-            }
-        }
-        if currentIdx < 0 {
-            currentIdx = 0
-        }
-
-        var lines: [(text: String, isCurrent: Bool)] = []
-        for offset in -3...3 {
-            let idx = currentIdx + offset
-            if idx >= 0 && idx < lyrics.count {
-                lines.append((lyrics[idx].text, offset == 0))
-            } else {
-                lines.append(("", false))
-            }
-        }
-        return lines
-    }
-
-    private func getSpotifyState() -> SpotifyState? {
-        let output = appleScriptQueue.sync { () -> String in
-            guard executeAppleScriptUnlocked(checkRunningScript) == "true" else {
-                return ""
-            }
-            return executeAppleScriptUnlocked(fetchStateScript)
-        }
-        let parts = output.components(separatedBy: "||")
-        guard parts.count >= 6 else { return nil }
-
-        guard
-            let position = TimeInterval(parts[2].replacingOccurrences(of: ",", with: ".")),
-            let duration = TimeInterval(parts[3].replacingOccurrences(of: ",", with: "."))
-        else {
-            return nil
-        }
-
-        return SpotifyState(
-            track: parts[0],
-            artist: parts[1],
-            position: position,
-            duration: duration,
-            id: parts[4],
-            playing: parts[5] == "playing"
-        )
-    }
-
-    private func executeAppleScriptUnlocked(_ script: NSAppleScript) -> String {
-        var error: NSDictionary?
-        let result = script.executeAndReturnError(&error)
-        guard error == nil else { return "" }
-        return result.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
-
-    private func fetchLyrics(
-        track: String,
-        artist: String,
-        duration: TimeInterval,
-        bypassCache: Bool = false
-    ) -> [LyricLine] {
-        let forcePlain = stateQueue.sync { forcePlainLyrics }
-        let lookup = lyricsLookup(track: track, artist: artist, duration: duration)
-
-        if !bypassCache, let cachedResponse = lyricsCache.response(for: lookup.cacheKey) {
-            let cachedLyrics = lyrics(from: cachedResponse, duration: lookup.duration, forcePlain: forcePlain)
-            if !cachedLyrics.isEmpty {
-                return cachedLyrics
-            }
-        }
-
-        if !bypassCache,
-           let cachedResponse = lyricsCache.response(track: lookup.track, artist: lookup.artist, duration: lookup.duration) {
-            let cachedLyrics = lyrics(from: cachedResponse, duration: lookup.duration, forcePlain: forcePlain)
-            if !cachedLyrics.isEmpty {
-                lyricsCache.store(cachedResponse, for: lookup.cacheKey)
-                return cachedLyrics
-            }
-        }
-
-        if let data = requestLRCLib(
-            path: "/api/get",
-            query: [
-                URLQueryItem(name: "track_name", value: lookup.track),
-                URLQueryItem(name: "artist_name", value: lookup.artist),
-                URLQueryItem(name: "duration", value: "\(Int(lookup.duration))"),
-            ]
-        ) {
-            if let response = try? decoder.decode(LRCLibResponse.self, from: data) {
-                let parsed = lyrics(from: response, duration: lookup.duration, forcePlain: forcePlain)
-                if !parsed.isEmpty, lyricsMatchScore(result: response, lookup: lookup) < maxLyricsMatchScore {
-                    lyricsCache.store(response, for: lookup.cacheKey)
-                    return parsed
-                }
-            }
-        }
-
-        if let parsed = searchLyrics(
-            query: [
-                URLQueryItem(name: "track_name", value: lookup.track),
-                URLQueryItem(name: "artist_name", value: lookup.artist),
-            ],
-            lookup: lookup,
-            forcePlain: forcePlain
-        ) {
-            return parsed
-        }
-
-        if let parsed = searchLyrics(
-            query: [URLQueryItem(name: "q", value: "\(lookup.track) \(lookup.artist)")],
-            lookup: lookup,
-            forcePlain: forcePlain
-        ) {
-            return parsed
-        }
-
-        return []
-    }
-
-    private func searchLyrics(query: [URLQueryItem], lookup: LyricsLookup, forcePlain: Bool) -> [LyricLine]? {
-        guard let searchData = requestLRCLib(
-            path: "/api/search",
-            query: query
-        ) else {
-            return nil
-        }
-
-        do {
-            let results = try decoder.decode([LRCLibResponse].self, from: searchData)
-
-            let scored = results.compactMap { result -> (LRCLibResponse, Double)? in
-                guard result.syncedLyrics != nil || result.plainLyrics != nil else { return nil }
-                let score = lyricsMatchScore(result: result, lookup: lookup)
-                guard score < maxLyricsMatchScore else { return nil }
-                return (result, score)
-            }
-
-            guard let best = scored.min(by: { $0.1 < $1.1 })?.0 else { return nil }
-            let parsed = lyrics(from: best, duration: lookup.duration, forcePlain: forcePlain)
-            guard !parsed.isEmpty else { return nil }
-            if !parsed.isEmpty {
-                lyricsCache.store(best, for: lookup.cacheKey)
-            }
-            return parsed
-        } catch {
-            return nil
-        }
-    }
-
-    private func lyricsLookup(track: String, artist: String, duration: TimeInterval) -> LyricsLookup {
-        let cleanTrack = track.replacingOccurrences(
-            of: #"\s*[\(\[].*?[\)\]]\s*"#,
-            with: "",
-            options: .regularExpression
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanArtist = artist.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? artist
-        return LyricsLookup(
-            track: cleanTrack,
-            artist: cleanArtist,
-            duration: duration,
-            cacheKey: lyricsCacheKey(track: cleanTrack, artist: cleanArtist, duration: duration)
-        )
-    }
-
-    private func lyricsMatchScore(result: LRCLibResponse, lookup: LyricsLookup) -> Double {
-        let titlePenalty = textMatchPenalty(expected: lookup.track, actual: result.trackName)
-        let artistPenalty = textMatchPenalty(expected: lookup.artist, actual: result.artistName)
-        let durationDelta = abs((result.duration ?? lookup.duration) - lookup.duration)
-        return titlePenalty * 100 + artistPenalty * 50 + durationDelta
-    }
-
-    private func textMatchPenalty(expected: String, actual: String?) -> Double {
-        let expectedText = normalizedMatchText(expected)
-        guard !expectedText.isEmpty else { return 0 }
-        guard let actual, !actual.isEmpty else { return 20 }
-
-        let actualText = normalizedMatchText(actual)
-        if actualText == expectedText { return 0 }
-        if actualText.contains(expectedText) || expectedText.contains(actualText) { return 1 }
-        return 100
-    }
-
-    private func normalizedMatchText(_ text: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(.whitespaces)
-        let scalars = text.lowercased().unicodeScalars.map { scalar -> Character in
-            allowed.contains(scalar) ? Character(scalar) : " "
-        }
-        return String(scalars)
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-    }
-
-    private func lyricsCacheKey(track: String, artist: String, duration: TimeInterval) -> String {
-        [
-            track.lowercased(),
-            artist.lowercased(),
-            String(Int(duration.rounded())),
-        ].joined(separator: "|")
-    }
-
-    private func normalizedLRCText(_ text: String) -> String {
-        let withoutControls = text.replacingOccurrences(of: "\u{001B}[106;5u", with: "\n")
-
-        var normalized = ""
-        var index = withoutControls.startIndex
-        while index < withoutControls.endIndex {
-            if index != withoutControls.startIndex,
-               withoutControls[index] == "[",
-               isTimestampStart(in: withoutControls, at: index),
-               !normalized.hasSuffix("\n") {
-                normalized.append("\n")
-            }
-            normalized.append(withoutControls[index])
-            index = withoutControls.index(after: index)
-        }
-
-        return normalized
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func isTimestampStart(in text: String, at index: String.Index) -> Bool {
-        let next = text.index(after: index)
-        guard next < text.endIndex, text[next].isNumber else { return false }
-
-        var cursor = next
-        while cursor < text.endIndex, text[cursor].isNumber {
-            cursor = text.index(after: cursor)
-        }
-
-        guard cursor < text.endIndex, text[cursor] == ":" else { return false }
-        cursor = text.index(after: cursor)
-        guard cursor < text.endIndex, text[cursor].isNumber else { return false }
-
-        return true
-    }
-
-    private func requestLRCLib(path: String, query: [URLQueryItem]) -> Data? {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "lrclib.net"
-        components.path = path
-        components.queryItems = query
-
-        guard let url = components.url else { return nil }
-        var request = URLRequest(url: url)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var resultData: Data?
-        var statusCode = 0
-
-        ephemeralSession.dataTask(with: request) { data, response, _ in
-            resultData = data
-            statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            semaphore.signal()
-        }.resume()
-
-        _ = semaphore.wait(timeout: .now() + 5)
-        guard statusCode == 200 else { return nil }
-        return resultData
-    }
-
-    private func parseLRCLib(data: Data, duration: TimeInterval, forcePlain: Bool) -> [LyricLine] {
-        do {
-            let response = try decoder.decode(LRCLibResponse.self, from: data)
-            return lyrics(from: response, duration: duration, forcePlain: forcePlain)
-        } catch {
-            return []
-        }
-    }
-
-    private func lyrics(from response: LRCLibResponse, duration: TimeInterval, forcePlain: Bool) -> [LyricLine] {
-        if !forcePlain, let syncedLyrics = response.syncedLyrics, !syncedLyrics.isEmpty {
-            return parseLRC(syncedLyrics)
-        }
-
-        guard let plainLyrics = response.plainLyrics, duration > 0 else {
-            return []
-        }
-
-        let lines = plainLyrics
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        guard !lines.isEmpty else { return [] }
-        let step = duration / TimeInterval(lines.count)
-        return lines.enumerated().map { index, line in
-            LyricLine(timestamp: TimeInterval(index) * step, text: line)
-        }
-    }
-
-    private static let lrcRegex = try! NSRegularExpression(pattern: #"\[(\d+):(\d+\.?\d*)\]([^\[]*)"#)
-
-    private func parseLRC(_ lrcText: String) -> [LyricLine] {
-        let normalizedText = normalizedLRCText(lrcText)
-        let range = NSRange(normalizedText.startIndex..<normalizedText.endIndex, in: normalizedText)
-        let matches = Self.lrcRegex.matches(in: normalizedText, range: range)
-
-        let lines = matches.compactMap { match -> LyricLine? in
-            guard
-                let minuteRange = Range(match.range(at: 1), in: normalizedText),
-                let secondRange = Range(match.range(at: 2), in: normalizedText),
-                let textRange = Range(match.range(at: 3), in: normalizedText),
-                let minutes = TimeInterval(normalizedText[minuteRange]),
-                let seconds = TimeInterval(normalizedText[secondRange])
-            else {
-                return nil
-            }
-
-            let text = normalizedText[textRange].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            return LyricLine(timestamp: minutes * 60 + seconds, text: text)
-        }
-
-        return lines.sorted { $0.timestamp < $1.timestamp }
-    }
-
-    private static func fitsStatusItem(_ text: String) -> Bool {
-        let width = (text as NSString).size(withAttributes: [.font: NSFont.menuBarFont(ofSize: 0)]).width
-        return width + statusItemHorizontalPadding <= maxStatusItemWidth
-    }
-
-    /// Splits at the space nearest the middle; nil when there is no space.
-    private static func splitInTwo(_ text: String) -> (String, String)? {
-        let mid = text.index(text.startIndex, offsetBy: text.count / 2)
-        let candidates = [text[..<mid].lastIndex(of: " "), text[mid...].firstIndex(of: " ")].compactMap { $0 }
-        guard let split = candidates.min(by: {
-            abs(text.distance(from: $0, to: mid)) < abs(text.distance(from: $1, to: mid))
-        }) else { return nil }
-        return (String(text[..<split]), String(text[text.index(after: split)...]))
-    }
-
-    private static func truncated(_ text: String) -> String {
-        guard text.count > maxChars else { return text }
-        return String(text.prefix(maxChars - 1)) + "…"
     }
 }
 
