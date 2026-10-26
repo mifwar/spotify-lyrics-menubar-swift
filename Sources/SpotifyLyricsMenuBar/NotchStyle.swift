@@ -13,9 +13,14 @@ enum NotchStyle {
     static let lineHeight: CGFloat = 19
     static let lineSpacing: CGFloat = 3
     static let verticalPadding: CGFloat = 10
+    /// The cover slot keeps the waveform of the lyric column: 44 pt of artwork
+    /// and a 14 pt gutter leave exactly the width the wrapped line is measured
+    /// against, so shrinking either would change where lyrics wrap.
     static let artworkSize: CGFloat = 44
     static let artworkGap: CGFloat = 14
-    static let artworkCornerRadius: CGFloat = 8
+    /// Slightly squarer than a squircle at this size: a restrained tile next to
+    /// the 16 pt card, not a pill.
+    static let artworkCornerRadius: CGFloat = 6
     static let cornerRadius: CGFloat = 16
 
     /// The dot's window is bigger than the dot so a click can find it.
@@ -36,16 +41,29 @@ enum NotchStyle {
     static let transportButtonSize: CGFloat = 20
     static let transportGap: CGFloat = 28
     static let transportGlyphSize: CGFloat = 15
-    static let transportRowHeight: CGFloat = 8 + transportButtonSize
     static let transportColor = NSColor.white.withAlphaComponent(0.85)
+
+    /// The pinned footer is its own band under the lyric block: a hairline, a
+    /// gap, then the transports. The spacing is explicit here instead of being
+    /// borrowed from a font's leading, so a font change cannot re-space it.
+    static let footerTopGap: CGFloat = 10
+    static let separatorHeight: CGFloat = 1
+    static let separatorColor = NSColor.white.withAlphaComponent(0.12)
+    static let footerGap: CGFloat = 9
+    static var footerHeight: CGFloat {
+        footerTopGap + separatorHeight + footerGap + transportButtonSize
+    }
 
     static let currentFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
     static let lineFont = NSFont.systemFont(ofSize: 13)
-    static let artworkFont = NSFont.systemFont(ofSize: 28)
+    static let artworkFont = NSFont.systemFont(ofSize: 22)
     static let currentColor = NSColor.white
     static let lineColor = NSColor.white.withAlphaComponent(0.55)
     static let dotColor = NSColor.white.withAlphaComponent(0.85)
     static let artworkFill = NSColor.white.withAlphaComponent(0.1)
+    /// A hairline edge so a very dark cover still reads as a tile on the black
+    /// card. Faint enough to disappear behind actual artwork.
+    static let artworkEdge = NSColor.white.withAlphaComponent(0.08)
     static let artworkGlyphColor = NSColor.white.withAlphaComponent(0.5)
 
     /// Blank strip the hardware cutout occupies. Nothing may be drawn there, so
@@ -69,24 +87,16 @@ enum NotchStyle {
         return CGFloat(count) * lineHeight + CGFloat(count - 1) * wrappedLineSpacing
     }
 
-    /// Height of all rows, gaps included.
-    static func rowsHeight(currentLineCount: Int) -> CGFloat {
-        let slots = rowRadius * 2 + 1
-        let rows = (0..<slots).reduce(CGFloat.zero) {
-            $0 + rowHeight(slot: $1, currentLineCount: currentLineCount)
-        }
-        return rows + CGFloat(slots - 1) * lineSpacing
-    }
-
-    /// How many rows the current line needs at the expanded card's width. The
-    /// card draws from the same function, so its frame and its layout agree.
-    static func currentLineCount(_ text: String) -> Int {
-        NotchText.wrapped(
-            text,
-            font: currentFont,
-            to: textColumnWidth(for: maxWidth),
-            maxRows: currentLineRows
-        ).count
+    /// Slots that actually carry text, with their original indices. Empty slots
+    /// at either end are padding — a song's intro has nothing above the first
+    /// line — and a card that reserved their space would sit low at the start of
+    /// a track and high at the end of one.
+    static func visibleSlots(in window: LyricsWindow?) -> [Int] {
+        let rows = window?.rows(radius: rowRadius) ?? []
+        let filled = rows.indices.filter { rows[$0]?.text.isEmpty == false }
+        guard let first = filled.first, let last = filled.last else { return [] }
+        // Keep the interior (a gap inside the song is still a row), drop the ends.
+        return Array(first...last)
     }
 
     static func collapsedSize(for geometry: NotchGeometry, text: String) -> NSSize {
@@ -116,15 +126,143 @@ enum NotchStyle {
 
     static func expandedSize(
         for geometry: NotchGeometry,
-        currentLine: String,
+        window: LyricsWindow?,
         showsTransport: Bool
     ) -> NSSize {
-        let rowCount = max(1, currentLineCount(currentLine))
-        var contentHeight = max(rowsHeight(currentLineCount: rowCount), artworkSize) + 2 * verticalPadding
-        if showsTransport {
-            contentHeight += transportRowHeight
+        NotchCardLayout.make(
+            for: window,
+            width: maxWidth,
+            contentTop: contentTop(for: geometry),
+            showsTransport: showsTransport
+        ).size
+    }
+}
+
+/// One computed geometry for the expanded card: the rows with their wrapped
+/// text, the artwork slot, the pinned footer (separator and transport targets)
+/// and the size the panel must be.
+///
+/// Both the controller (which sizes the window) and the view (which draws and
+/// hit-tests it) call `make`, so padding, wrapping and the footer cannot make
+/// the frame and the drawing disagree — there is no second copy of the
+/// arithmetic anywhere.
+struct NotchCardLayout {
+    /// One drawable expanded row. Rows are laid out once and then both drawn and
+    /// hit-tested from these rects — never from a pitch.
+    struct Row {
+        let slot: Int
+        let rect: NSRect
+        let lines: [String]
+    }
+
+    let size: NSSize
+    let rows: [Row]
+    let artwork: NSRect
+    /// The hairline above the transport targets; nil unless the footer is shown.
+    let separator: NSRect?
+    /// The whole footer band, separator to the bottom of the targets: a click
+    /// anywhere in it belongs to the footer, never to a pin or a seek.
+    let footer: NSRect?
+    let transport: [(command: TransportCommand, rect: NSRect)]
+
+    /// Only the rows the window has text for are laid out — empty slots at the
+    /// ends would otherwise reserve space and leave a song's first lines sitting
+    /// near the bottom of the card — and the block is centred vertically inside
+    /// the content area, with the artwork centred against it.
+    static func make(
+        for window: LyricsWindow?,
+        width: CGFloat,
+        contentTop: CGFloat,
+        showsTransport: Bool
+    ) -> NotchCardLayout {
+        let columnX = NotchStyle.horizontalPadding + NotchStyle.artworkSize + NotchStyle.artworkGap
+        let columnWidth = NotchStyle.textColumnWidth(for: width)
+        let windowRows = window?.rows(radius: NotchStyle.rowRadius) ?? []
+        let slots = NotchStyle.visibleSlots(in: window)
+
+        var texts: [[String]] = []
+        var heights: [CGFloat] = []
+        for slot in slots {
+            let line = windowRows.indices.contains(slot) ? windowRows[slot] : nil
+            let lines: [String]
+            if slot == NotchStyle.rowRadius {
+                lines = NotchText.wrapped(
+                    line?.text ?? "",
+                    font: NotchStyle.currentFont,
+                    to: columnWidth,
+                    maxRows: NotchStyle.currentLineRows
+                )
+            } else {
+                lines = line.map { [$0.text] } ?? []
+            }
+            texts.append(lines)
+            heights.append(NotchStyle.rowHeight(slot: slot, currentLineCount: lines.count))
         }
-        return NSSize(width: maxWidth, height: contentTop(for: geometry) + contentHeight)
+
+        let rowsHeight = heights.reduce(0, +) + CGFloat(max(0, slots.count - 1)) * NotchStyle.lineSpacing
+        let blockHeight = max(rowsHeight, NotchStyle.artworkSize)
+        let blockTop = contentTop + NotchStyle.verticalPadding
+        var y = blockTop + (blockHeight - rowsHeight) / 2
+        var rows: [Row] = []
+        for (index, slot) in slots.enumerated() {
+            rows.append(Row(
+                slot: slot,
+                rect: NSRect(x: columnX, y: y, width: columnWidth, height: heights[index]),
+                lines: texts[index]
+            ))
+            y += heights[index] + NotchStyle.lineSpacing
+        }
+
+        let artwork = NSRect(
+            x: NotchStyle.horizontalPadding,
+            y: blockTop + blockHeight / 2 - NotchStyle.artworkSize / 2,
+            width: NotchStyle.artworkSize,
+            height: NotchStyle.artworkSize
+        )
+
+        var height = blockTop + blockHeight + NotchStyle.verticalPadding
+        var separator: NSRect?
+        var footer: NSRect?
+        var transport: [(command: TransportCommand, rect: NSRect)] = []
+        if showsTransport {
+            // The hairline lines up with the text margins, not with the card's
+            // edge, so it reads as part of the composition above it.
+            let separatorRect = NSRect(
+                x: NotchStyle.horizontalPadding,
+                y: blockTop + blockHeight + NotchStyle.footerTopGap,
+                width: max(0, width - 2 * NotchStyle.horizontalPadding),
+                height: NotchStyle.separatorHeight
+            )
+            let targetTop = separatorRect.maxY + NotchStyle.footerGap
+            let stride = NotchStyle.transportButtonSize + NotchStyle.transportGap
+            let firstX = width / 2 - NotchStyle.transportWidth / 2
+            let commands: [TransportCommand] = [.previous, .playPause, .next]
+            transport = commands.enumerated().map { index, command in
+                (command, NSRect(
+                    x: firstX + CGFloat(index) * stride,
+                    y: targetTop,
+                    width: NotchStyle.transportButtonSize,
+                    height: NotchStyle.transportButtonSize
+                ))
+            }
+            separator = separatorRect
+            footer = NSRect(
+                x: 0,
+                y: separatorRect.minY,
+                width: width,
+                height: separatorRect.height + NotchStyle.footerGap + NotchStyle.transportButtonSize
+            )
+            height += NotchStyle.footerHeight
+        }
+
+        return NotchCardLayout(
+            size: NSSize(width: width, height: height),
+            rows: rows,
+            artwork: artwork,
+            separator: separator,
+            footer: footer,
+            transport: transport
+        )
     }
 }
 
