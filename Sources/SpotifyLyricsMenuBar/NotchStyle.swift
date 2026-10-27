@@ -14,10 +14,12 @@ enum NotchStyle {
     static let lineSpacing: CGFloat = 3
     static let verticalPadding: CGFloat = 10
     /// The cover slot keeps the waveform of the lyric column: 44 pt of artwork
-    /// and a 14 pt gutter leave exactly the width the wrapped line is measured
-    /// against, so shrinking either would change where lyrics wrap.
+    /// and a 14 pt gutter sit to the left of the lyric column. The pin and its
+    /// gap reserve the right edge; each is excluded when measuring text.
     static let artworkSize: CGFloat = 44
     static let artworkGap: CGFloat = 14
+    static let pinButtonSize: CGFloat = 24
+    static let pinButtonGap: CGFloat = 8
     /// Slightly squarer than a squircle at this size: a restrained tile next to
     /// the 16 pt card, not a pill.
     static let artworkCornerRadius: CGFloat = 6
@@ -76,7 +78,7 @@ enum NotchStyle {
     /// Width of the lyric column in a card `width` wide: the side paddings and
     /// the artwork slot are not available to text.
     static func textColumnWidth(for width: CGFloat) -> CGFloat {
-        max(0, width - 2 * horizontalPadding - artworkSize - artworkGap)
+        max(0, width - 2 * horizontalPadding - artworkSize - artworkGap - pinButtonGap - pinButtonSize)
     }
 
     /// Height of one expanded row. Only the current row grows, and only by the
@@ -158,6 +160,7 @@ struct NotchCardLayout {
     let size: NSSize
     let rows: [Row]
     let artwork: NSRect
+    let pinButton: NSRect
     /// The hairline above the transport targets; nil unless the footer is shown.
     let separator: NSRect?
     /// The whole footer band, separator to the bottom of the targets: a click
@@ -259,6 +262,12 @@ struct NotchCardLayout {
             size: NSSize(width: width, height: height),
             rows: rows,
             artwork: artwork,
+            pinButton: NSRect(
+                x: width - NotchStyle.horizontalPadding - NotchStyle.pinButtonSize,
+                y: blockTop,
+                width: NotchStyle.pinButtonSize,
+                height: NotchStyle.pinButtonSize
+            ),
             separator: separator,
             footer: footer,
             transport: transport

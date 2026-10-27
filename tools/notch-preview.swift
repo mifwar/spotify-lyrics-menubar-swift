@@ -20,6 +20,7 @@
 //     Sources/SpotifyLyricsMenuBar/NotchStyle.swift \
 //     Sources/SpotifyLyricsMenuBar/NotchCardView.swift \
 //     Sources/SpotifyLyricsMenuBar/NotchLyricsController.swift \
+//     tools/notch-pin-checks.swift \
 //     build/notch-preview/main.swift
 //   ./build/notch-preview/notch-preview /Users/eros/.crew/notch-lyrics/out
 
@@ -217,7 +218,7 @@ func snapshot(_ name: String, geometry: NotchGeometry) {
 /// positions: the only arithmetic it may do is measure what the card laid out.
 func checkPinnedTransport(_ variant: String, geometry: NotchGeometry) {
     let view = cardView()
-    check(view.showsTransport, "\(variant): the pinned card shows transport")
+    check(view.isPinned, "\(variant): the pinned card shows transport")
     check(view.isExpanded, "\(variant): the pinned card is expanded")
 
     // Every 1 pt probe that reports a command, grouped into bounding boxes.
@@ -339,7 +340,7 @@ func checkRowBand(_ variant: String, label: String, geometry: NotchGeometry) {
 /// Hover-expanded cards must have no transport row at all.
 func checkHoverHasNoTransport(_ variant: String, geometry: NotchGeometry) {
     let view = cardView()
-    check(!view.showsTransport, "\(variant): a hover-expanded card shows no transport")
+    check(!view.isPinned, "\(variant): a hover-expanded card shows no transport")
     var band = false
     var hit: TransportCommand?
     for y in stride(from: 0.0, through: view.bounds.height, by: 1.0) {
@@ -421,6 +422,8 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     checkHoverHasNoTransport("\(variant)", geometry: geometry)
     snapshot("\(variant)-expanded", geometry: geometry)
 
+    checkPinInteraction(variant, geometry: geometry)
+
     // 3. A click on an earlier line seeks to its timestamp.
     let seeksBefore = seeks.count
     controller.click(at: NSPoint(x: card().bounds.midX, y: firstRowCenter))
@@ -429,9 +432,9 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
         "\(variant): clicking an earlier line seeks to 10 s"
     )
 
-    // 4. Padding pins, and the pin outlives the pointer.
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
-    check(controller.isPinned, "\(variant): clicking padding pins")
+    // 4. The explicit pin button keeps the card open after the pointer leaves.
+    clickPinButton()
+    check(controller.isPinned, "\(variant): clicking the pin button pins")
     controller.setHovered(false)
     wait(0.9)
     check(controller.isPinned, "\(variant): pin survives the pointer leaving")
@@ -441,8 +444,8 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     snapshot("\(variant)-pinned", geometry: geometry)
 
     // 5. Unpinning with the pointer away collapses after the grace period.
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
-    check(!controller.isPinned, "\(variant): clicking padding again unpins")
+    clickPinButton()
+    check(!controller.isPinned, "\(variant): clicking the pin button again unpins")
     wait(0.75)
     check(panel().frame.height == collapsed.height, "\(variant): unpinned card collapses after the grace")
 
@@ -508,7 +511,7 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     wait(0.2)
     controller.setHovered(true)
     wait(0.5)
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    clickPinButton()
     check(controller.isPinned, "\(variant): pinned before obscuring")
     let pinnedFrame = panel().frame
     controller.present(presentation(.playing), geometry: geometry, isObscured: true)
@@ -599,11 +602,11 @@ func checkIntroFixture(_ variant: String, geometry: NotchGeometry) {
     checkRowBand(variant, label: "the intro rows", geometry: geometry)
     snapshot("\(variant)-intro-hover", geometry: geometry)
 
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    clickPinButton()
     wait(0.2)
     check(controller.isPinned, "\(variant): the intro card pins")
     snapshot("\(variant)-intro-pinned", geometry: geometry)
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    clickPinButton()
     wait(0.6)
     controller.dismiss()
     seeks.removeAll()
@@ -654,7 +657,7 @@ func checkFewRowsBalance(_ variant: String, geometry: NotchGeometry) {
     snapshot("\(variant)-song-start", geometry: geometry)
 
     // The reported case: pinned while the song is still on its first lines.
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    clickPinButton()
     wait(0.2)
     check(controller.isPinned, "\(variant): the song-start card pins")
     check(
@@ -662,7 +665,7 @@ func checkFewRowsBalance(_ variant: String, geometry: NotchGeometry) {
         "\(variant): pinned song-start height is rows + footer only (\(Int(panel().frame.height)) pt)"
     )
     snapshot("\(variant)-song-start-pinned", geometry: geometry)
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    clickPinButton()
     wait(0.6)
 
     // A single-line window is centred against the artwork slot rather than
@@ -799,15 +802,15 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
     let gaps = probes.filter { $0.slot == nil }.count
     check(gaps > 0, "\(variant): the gaps between rows are misses (\(gaps) pt of \(Int(card().bounds.height)))")
 
-    // A click in the middle of the current row seeks nothing and pins instead.
+    // The current row never changes pinning or seeks.
     if let currentRun = rowRuns.first(where: { $0.slot == NotchStyle.rowRadius }) {
         let before = seeks.count
         let pinnedBefore = controller.isPinned
         controller.click(at: NSPoint(x: card().bounds.midX, y: (currentRun.from + currentRun.to) / 2))
         check(seeks.count == before, "\(variant): clicking the current row does not seek")
-        check(controller.isPinned != pinnedBefore, "\(variant): clicking the current row pins")
+        check(controller.isPinned == pinnedBefore, "\(variant): clicking the current row does not pin")
         controller.click(at: NSPoint(x: card().bounds.midX, y: (currentRun.from + currentRun.to) / 2))
-        check(controller.isPinned == pinnedBefore, "\(variant): clicking it again unpins")
+        check(controller.isPinned == pinnedBefore, "\(variant): clicking it again leaves pinning unchanged")
     }
 
     // (b) three rows needed: the second row is ellipsized, never a third line.
@@ -827,8 +830,7 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
         fallbackLayout.rows.first { $0.slot == NotchStyle.rowRadius }?.lines.count == 2,
         "\(variant): the canonical layout also stops at 2 rows"
     )
-    // From a clean expanded state, so the grace timer from the pin toggles above
-    // cannot leave the card collapsed while it is being measured.
+    // Start from a clean expanded state before measuring the fallback.
     controller.dismiss()
     controller.present(presentation(current: hugeText), geometry: geometry, isObscured: false)
     wait(0.15)
@@ -857,25 +859,6 @@ func presentWindow(_ window: LyricsWindow, geometry: NotchGeometry) {
         geometry: geometry,
         isObscured: false
     )
-}
-
-/// Puts the card in the state the footer lives in: pinned on the base window.
-func pinBaseWindow(_ variant: String, geometry: NotchGeometry) {
-    controller.dismiss()
-    controller.present(presentation(.playing), geometry: geometry, isObscured: false)
-    wait(0.15)
-    controller.setHovered(true)
-    wait(0.5)
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
-    wait(0.4)
-    check(controller.isPinned, "\(variant): the pinned footer fixture is pinned")
-}
-
-func unpinBaseWindow() {
-    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
-    wait(0.6)
-    controller.dismiss()
-    seeks.removeAll()
 }
 
 /// The pinned footer: a hairline inset to the text margins, a real gap to the
