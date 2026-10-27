@@ -17,8 +17,7 @@ func checkPinInteraction(_ variant: String, geometry: NotchGeometry) {
     let layout = NotchCardLayout.make(
         for: baseWindow,
         width: view.bounds.width,
-        contentTop: NotchStyle.contentTop(for: geometry),
-        showsTransport: false
+        contentTop: NotchStyle.contentTop(for: geometry)
     )
     check(!button.isHidden && button.frame == layout.pinButton, "\(variant): hover exposes the pin button")
     check(view.hitTest(view.convert(NSPoint(x: button.frame.midX, y: button.frame.midY), to: view.superview)) === button,
@@ -28,8 +27,10 @@ func checkPinInteraction(_ variant: String, geometry: NotchGeometry) {
     check(button.state == .off && button.toolTip == "Pin lyrics open", "\(variant): unpinned control offers pinning")
     check(button.accessibilityLabel() == "Keep lyrics open", "\(variant): pin has an accessible label")
 
+    let expandedFrame = panel().frame
     for pinned in [false, true] {
         if pinned { clickPinButton() }
+        check(panel().frame == expandedFrame, "\(variant): pinning leaves the expanded frame unchanged")
         let seeksBefore = seeks.count
         let transportsBefore = transports.count
         let points = [
@@ -50,7 +51,7 @@ func checkPinInteraction(_ variant: String, geometry: NotchGeometry) {
     check(button.state == .off, "\(variant): unpin clears the selected state")
 }
 
-/// Puts the card in the state the footer lives in: pinned on the base window.
+/// Holds the base-window fixture open while inspecting its footer.
 func pinBaseWindow(_ variant: String, geometry: NotchGeometry) {
     controller.dismiss()
     controller.present(presentation(.playing), geometry: geometry, isObscured: false)

@@ -55,13 +55,11 @@ final class NotchCardView: NSView {
 
     var isSimulated = true { didSet { if oldValue != isSimulated { needsDisplay = true } } }
 
-    /// The controller owns pin state; the button and footer render it.
+    /// The controller owns pin state; the button renders it.
     var isPinned = false {
         didSet {
             guard oldValue != isPinned else { return }
             updatePinButton()
-            updateLayout()
-            needsDisplay = true
         }
     }
 
@@ -191,8 +189,7 @@ final class NotchCardView: NSView {
             ? NotchCardLayout.make(
                 for: lyrics,
                 width: bounds.width,
-                contentTop: contentTop,
-                showsTransport: isPinned
+                contentTop: contentTop
             )
             : nil
         pinButton.isHidden = layout == nil
@@ -221,7 +218,7 @@ final class NotchCardView: NSView {
     /// True anywhere inside the transport band, including the gaps between the
     /// targets. A click there must do nothing at all — not pin, not seek.
     func isInTransportRow(_ point: NSPoint) -> Bool {
-        layout?.footer?.contains(point) ?? false
+        layout?.footer.contains(point) ?? false
     }
 
     // MARK: - Drawing
@@ -309,9 +306,7 @@ final class NotchCardView: NSView {
                 drawLine(row.lines[0], in: row.rect, isCurrent: false)
             }
         }
-        if let separator = layout.separator {
-            drawSeparator(separator)
-        }
+        drawSeparator(layout.separator)
         drawTransport(layout.transport)
     }
 
@@ -324,7 +319,6 @@ final class NotchCardView: NSView {
     }
 
     private func drawTransport(_ targets: [(command: TransportCommand, rect: NSRect)]) {
-        guard isPinned else { return }
         let config = NSImage.SymbolConfiguration(pointSize: NotchStyle.transportGlyphSize, weight: .medium)
             .applying(NSImage.SymbolConfiguration(paletteColors: [NotchStyle.transportColor]))
         for (command, rect) in targets {

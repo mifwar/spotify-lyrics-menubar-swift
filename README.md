@@ -53,7 +53,7 @@ The selected display mode and the panel's position and size are persisted and re
 
 In notch mode the menu bar item disappears and the current lyric line attaches to the notch itself, so nothing competes for menu bar space.
 
-- **Hover** the notch to expand it downward into five lines (the current one plus two either side) with the track artwork.
+- **Hover** the notch to expand it downward into five lines (the current one plus two either side) with the track artwork and previous, play/pause and next controls.
 - **Click a line** to seek to it. Seeking is disabled when the timing is estimated (plain lyrics fallback, imported lyrics without timestamps), because those timestamps are spread evenly rather than measured.
 - **Click the pin button** in the expanded card’s upper-right corner to keep it open. The filled pin shows that it is pinned; click it again to unpin. A pinned panel ignores hover-out and the paused idle shrink. Clicking the current line, artwork or empty space does not change the pin.
 - **Right-click** the panel for the usual menu: refresh, LRCLib search, clipboard import, plain lyrics, timing offsets.

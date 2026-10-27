@@ -186,8 +186,7 @@ final class NotchLyricsController: NSObject {
         case .expanded:
             size = NotchStyle.expandedSize(
                 for: geometry,
-                window: presentation.window,
-                showsTransport: isPinned
+                window: presentation.window
             )
         case .collapsed:
             size = NotchStyle.collapsedSize(for: geometry, text: currentLine)
