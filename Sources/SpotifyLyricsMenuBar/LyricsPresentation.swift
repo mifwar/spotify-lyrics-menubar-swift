@@ -95,3 +95,11 @@ struct LyricsPresentation {
 enum PlaybackState {
     case playing, paused, none
 }
+
+/// Transport intent from a surface. The surface never talks to the player: it
+/// reports what was clicked and the engine decides what it means. It lives with
+/// the shared contract because the engine, the style, the card and the wiring
+/// all speak it.
+enum TransportCommand {
+    case playPause, next, previous
+}

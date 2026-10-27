@@ -7,12 +7,6 @@ enum Presence {
     case hidden, dot, collapsed, expanded
 }
 
-/// Transport intent from the card. The surface never talks to the player: it
-/// reports what was clicked and the app decides what that means.
-enum TransportCommand {
-    case playPause, next, previous
-}
-
 /// Draws the current lyric on the notch, expands while hovered or pinned, and
 /// shrinks to a dot when there is nothing to say. Main thread only, like every
 /// AppKit surface.
@@ -187,7 +181,7 @@ final class NotchLyricsController: NSObject {
         case .expanded:
             size = NotchStyle.expandedSize(
                 for: geometry,
-                currentLine: currentLine,
+                window: presentation.window,
                 showsTransport: isPinned
             )
         case .collapsed:

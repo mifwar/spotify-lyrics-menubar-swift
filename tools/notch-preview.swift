@@ -93,11 +93,24 @@ let lyrics = [
     LyricLine(timestamp: 60, text: "All these words I don't just say"),
 ]
 
-func presentation(_ playback: PlaybackState, exact: Bool = true) -> LyricsPresentation {
+/// The window the card is showing in the default checks: current line is index 3.
+let baseWindow = LyricsWindow.around(lyrics, at: 35)
+
+/// A window whose current line is `text`, to measure wrapped/few-row layouts.
+func window(current text: String) -> LyricsWindow {
+    var lines = baseWindow.lines
+    if let index = lines.firstIndex(where: { $0?.timestamp == 30 }) {
+        lines[index] = LyricLine(timestamp: 30, text: text)
+    }
+    return LyricsWindow(lines: lines, currentIndex: baseWindow.currentIndex)
+}
+
+func presentation(_ playback: PlaybackState, exact: Bool = true, artwork: NSImage? = colorfulArtwork()) -> LyricsPresentation {
     LyricsPresentation(
         window: LyricsWindow.around(lyrics, at: 35), // current: index 3, timestamp 30
         isTimingExact: exact,
         trackKey: "preview",
+        artwork: artwork,
         playback: playback
     )
 }
@@ -190,8 +203,8 @@ func snapshot(_ name: String, geometry: NotchGeometry) {
         // The caller names any path; make it instead of failing every render
         // on a fresh directory, which reads like a code failure.
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        try png.write(to: outputDirectory.appendingPathComponent("T18-\(name).png"))
-        print("wrote T18-\(name).png (\(Int(cardImage.size.width))×\(Int(cardImage.size.height)) card)")
+        try png.write(to: outputDirectory.appendingPathComponent("T22-\(name).png"))
+        print("wrote T22-\(name).png (\(Int(cardImage.size.width))×\(Int(cardImage.size.height)) card)")
     } catch {
         check(false, "could not write \(name): \(error.localizedDescription)")
     }
@@ -237,6 +250,11 @@ func checkPinnedTransport(_ variant: String, geometry: NotchGeometry) {
     if ordered.count == 3 {
         check(ordered[0].maxX < ordered[1].minX && ordered[1].maxX < ordered[2].minX,
               "\(variant): previous, play/pause and next sit left to right")
+        let groupMid = (ordered[0].minX + ordered[2].maxX) / 2
+        check(
+            abs(groupMid - view.bounds.midX) <= 1,
+            "\(variant): the transport group is centred on the whole card (mid \(Int(groupMid)) vs \(Int(view.bounds.midX)))"
+        )
         let gap = ordered[1].minX - ordered[0].maxX
         print("[\(variant)] transport targets: \(ordered.map { "\(Int($0.minX))-\(Int($0.maxX))" }.joined(separator: ", ")), gap \(Int(gap)) pt")
         check(gap > NotchStyle.transportButtonSize,
@@ -290,11 +308,11 @@ func checkPinnedTransport(_ variant: String, geometry: NotchGeometry) {
 /// math stays the single source of truth.
 func checkPinnedHeight(_ variant: String, geometry: NotchGeometry) {
     let view = cardView()
-    let expanded = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: false)
-    let pinned = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: true)
+    let expanded = NotchStyle.expandedSize(for: geometry, window: window(current: "And nothing else matters"), showsTransport: false)
+    let pinned = NotchStyle.expandedSize(for: geometry, window: window(current: "And nothing else matters"), showsTransport: true)
     check(
-        abs((pinned.height - expanded.height) - NotchStyle.transportRowHeight) < 0.5,
-        "\(variant): the card grows by exactly the transport row (\(Int(expanded.height)) -> \(Int(pinned.height)) pt)"
+        abs((pinned.height - expanded.height) - NotchStyle.footerHeight) < 0.5,
+        "\(variant): the card grows by exactly the footer band (\(Int(expanded.height)) -> \(Int(pinned.height)) pt)"
     )
     check(
         abs(view.bounds.height - pinned.height) < 0.5,
@@ -302,15 +320,36 @@ func checkPinnedHeight(_ variant: String, geometry: NotchGeometry) {
     )
 }
 
+/// The visible rows must sit exactly between the two paddings. The old one-sided
+/// check passed just as happily with the block floating high, which is the
+/// imbalance T19 exists to prevent.
+func checkRowBand(_ variant: String, label: String, geometry: NotchGeometry) {
+    let probes = probeRows().filter { $0.slot != nil }
+    guard let top = probes.map(\.y).min(), let bottom = probes.map(\.y).max() else {
+        check(false, "\(variant): \(label) has visible rows")
+        return
+    }
+    let expectedTop = NotchStyle.contentTop(for: geometry) + NotchStyle.verticalPadding
+    // Probes report the last point inside a row, one point short of its edge.
+    let expectedBottom = panel().frame.height - NotchStyle.verticalPadding - 1
+    check(abs(top - expectedTop) <= 2, "\(variant): \(label) start at the top padding (\(Int(top)) vs \(Int(expectedTop)) pt)")
+    check(abs(bottom - expectedBottom) <= 2, "\(variant): \(label) end at the bottom padding (\(Int(bottom)) vs \(Int(expectedBottom)) pt)")
+}
+
 /// Hover-expanded cards must have no transport row at all.
 func checkHoverHasNoTransport(_ variant: String, geometry: NotchGeometry) {
     let view = cardView()
     check(!view.showsTransport, "\(variant): a hover-expanded card shows no transport")
-    let rowTop = view.bounds.height - NotchStyle.transportRowHeight
-    let centre = NSPoint(x: view.bounds.midX, y: rowTop + NotchStyle.transportRowHeight / 2)
-    check(view.transportCommand(at: centre) == nil, "\(variant): no button is hit without pinning")
-    check(!view.isInTransportRow(centre), "\(variant): no transport band without pinning")
-    let expected = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: false)
+    var band = false
+    var hit: TransportCommand?
+    for y in stride(from: 0.0, through: view.bounds.height, by: 1.0) {
+        let point = NSPoint(x: view.bounds.midX, y: y)
+        band = band || view.isInTransportRow(point)
+        hit = hit ?? view.transportCommand(at: point)
+    }
+    check(hit == nil, "\(variant): no button is hit without pinning")
+    check(!band, "\(variant): no footer band without pinning")
+    let expected = NotchStyle.expandedSize(for: geometry, window: window(current: "And nothing else matters"), showsTransport: false)
     check(
         abs(view.bounds.height - expected.height) < 0.5,
         "\(variant): hover height has no transport row (\(Int(view.bounds.height)) pt)"
@@ -509,6 +548,174 @@ func cardView() -> NotchCardView {
     return view
 }
 
+/// The user's screenshot fixture: three short lines, current on the first, with
+/// the artwork that was on screen. Before/after can be compared directly.
+func introWindow() -> LyricsWindow {
+    let lines = [
+        LyricLine(timestamp: 0, text: "Blah blah blah"),
+        LyricLine(timestamp: 10, text: "Terdiam di tengah riuh siaran"),
+        LyricLine(timestamp: 20, text: "Curiga dengan niatnya"),
+    ]
+    return LyricsWindow.around(lines, at: 0)
+}
+
+/// A colourful stand-in cover, so the renders show artwork rather than only the
+/// placeholder glyph. Two tones make the aspect-fill and the rounded clip
+/// visible at 44 pt.
+func colorfulArtwork() -> NSImage {
+    let size = NSSize(width: 120, height: 120)
+    let image = NSImage(size: size)
+    image.lockFocus()
+    NSGradient(colors: [
+        NSColor(red: 0.96, green: 0.30, blue: 0.55, alpha: 1),
+        NSColor(red: 0.25, green: 0.36, blue: 0.95, alpha: 1),
+    ])?.draw(in: NSRect(origin: .zero, size: size), angle: -60)
+    image.unlockFocus()
+    return image
+}
+
+func checkIntroFixture(_ variant: String, geometry: NotchGeometry) {
+    let window = introWindow()
+    let song = LyricsPresentation(
+        window: window,
+        isTimingExact: true,
+        trackKey: "preview",
+        artwork: colorfulArtwork(),
+        playback: .playing
+    )
+    let slots = NotchStyle.visibleSlots(in: window)
+    check(slots.count == 3, "\(variant): the reported intro has 3 lyric rows, not 5")
+
+    let expected = NotchStyle.expandedSize(for: geometry, window: window, showsTransport: false)
+    controller.dismiss()
+    controller.present(song, geometry: geometry, isObscured: false)
+    wait(0.15)
+    controller.setHovered(true)
+    wait(0.5)
+    check(
+        abs(panel().frame.height - expected.height) < 0.5,
+        "\(variant): the intro card is sized to its 3 rows (\(Int(panel().frame.height)) pt)"
+    )
+    checkRowBand(variant, label: "the intro rows", geometry: geometry)
+    snapshot("\(variant)-intro-hover", geometry: geometry)
+
+    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    wait(0.2)
+    check(controller.isPinned, "\(variant): the intro card pins")
+    snapshot("\(variant)-intro-pinned", geometry: geometry)
+    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    wait(0.6)
+    controller.dismiss()
+    seeks.removeAll()
+}
+
+/// Empty slots at either end of a song must not reserve space: a card that did
+/// would sit low on the first line and high on the last.
+func checkFewRowsBalance(_ variant: String, geometry: NotchGeometry) {
+    let startWindow = LyricsWindow.around(lyrics, at: 0)   // current line is the first
+    let slots = NotchStyle.visibleSlots(in: startWindow)
+    check(slots.count == 3, "\(variant): a song's first line leaves \(slots.count) visible rows, not 5")
+    check(slots.contains(NotchStyle.rowRadius), "\(variant): the current line is one of them")
+    check(
+        slots == Array(slots.first!...slots.last!),
+        "\(variant): the visible rows are contiguous (\(slots))"
+    )
+
+    let fewHeight = NotchStyle.expandedSize(for: geometry, window: startWindow, showsTransport: false).height
+    let fullHeight = NotchStyle.expandedSize(for: geometry, window: baseWindow, showsTransport: false).height
+    check(fewHeight < fullHeight, "\(variant): the card is shorter when the window has fewer rows (\(Int(fewHeight)) < \(Int(fullHeight)) pt)")
+
+    controller.dismiss()
+    controller.present(
+        LyricsPresentation(window: startWindow, isTimingExact: true, trackKey: "preview", playback: .playing),
+        geometry: geometry,
+        isObscured: false
+    )
+    wait(0.15)
+    controller.setHovered(true)
+    wait(0.5)
+    check(
+        abs(panel().frame.height - fewHeight) < 0.5,
+        "\(variant): the window matches the few-row height (\(Int(panel().frame.height)) pt)"
+    )
+
+    let probes = probeRows()
+    let reachable = Set(probes.compactMap(\.slot))
+    check(reachable == Set(slots), "\(variant): only the rows with text are clickable (\(reachable.sorted()))")
+    let tops = probes.filter { $0.slot != nil }.map(\.y)
+    if let top = tops.min(), let bottom = tops.max() {
+        print("[\(variant)] few-row block: y \(Int(top))-\(Int(bottom)) in a \(Int(card().bounds.height)) pt card")
+        let expectedTop = NotchStyle.contentTop(for: geometry) + NotchStyle.verticalPadding
+        check(
+            abs(top - expectedTop) <= 2,
+            "\(variant): the visible rows are not pushed down by empty slots (top \(Int(top)) pt, expected \(Int(expectedTop)))"
+        )
+    }
+    snapshot("\(variant)-song-start", geometry: geometry)
+
+    // The reported case: pinned while the song is still on its first lines.
+    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    wait(0.2)
+    check(controller.isPinned, "\(variant): the song-start card pins")
+    check(
+        abs(panel().frame.height - (fewHeight + NotchStyle.footerHeight)) < 0.5,
+        "\(variant): pinned song-start height is rows + footer only (\(Int(panel().frame.height)) pt)"
+    )
+    snapshot("\(variant)-song-start-pinned", geometry: geometry)
+    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    wait(0.6)
+
+    // A single-line window is centred against the artwork slot rather than
+    // pinned to the top: 44 pt of artwork, 19 pt of text, the rest split evenly.
+    let message = LyricsWindow.message("Loading lyrics…")
+    let oneHeight = NotchStyle.expandedSize(for: geometry, window: message, showsTransport: false).height
+    check(
+        abs(oneHeight - (NotchStyle.contentTop(for: geometry) + 2 * NotchStyle.verticalPadding + NotchStyle.artworkSize)) < 0.5,
+        "\(variant): a one-line card is exactly the artwork slot plus paddings (\(Int(oneHeight)) pt)"
+    )
+    controller.dismiss()
+    controller.present(
+        LyricsPresentation(window: message, isPlaceholder: true, trackKey: nil, playback: .playing),
+        geometry: geometry,
+        isObscured: false
+    )
+    wait(0.15)
+    controller.setHovered(true)
+    wait(0.5)
+    let oneProbes = probeRows().filter { $0.slot != nil }
+    if let top = oneProbes.map(\.y).min(), let bottom = oneProbes.map(\.y).max() {
+        let midline = (top + bottom) / 2
+        let blockMid = NotchStyle.contentTop(for: geometry) + NotchStyle.verticalPadding + NotchStyle.artworkSize / 2
+        print("[\(variant)] one-line row: y \(Int(top))-\(Int(bottom)), mid \(Int(midline)) vs artwork mid \(Int(blockMid))")
+        check(abs(midline - blockMid) <= 2, "\(variant): a one-line row is centred against the artwork")
+    }
+    snapshot("\(variant)-one-line", geometry: geometry)
+
+    // The end of a song trims the other way: the last line sits above empty
+    // slots, and those must not push the block up under the notch.
+    let endWindow = LyricsWindow.around(lyrics, at: 60)
+    let endSlots = NotchStyle.visibleSlots(in: endWindow)
+    check(endSlots.count == 3, "\(variant): a song's last line leaves \(endSlots.count) visible rows")
+    let endHeight = NotchStyle.expandedSize(for: geometry, window: endWindow, showsTransport: false).height
+    controller.dismiss()
+    controller.present(
+        LyricsPresentation(window: endWindow, isTimingExact: true, trackKey: "preview", playback: .playing),
+        geometry: geometry,
+        isObscured: false
+    )
+    wait(0.15)
+    controller.setHovered(true)
+    wait(0.5)
+    check(
+        abs(panel().frame.height - endHeight) < 0.5,
+        "\(variant): the end-of-song card is sized to its rows (\(Int(panel().frame.height)) pt)"
+    )
+    checkRowBand(variant, label: "the last line group", geometry: geometry)
+    snapshot("\(variant)-end-hover", geometry: geometry)
+    controller.dismiss()
+    seeks.removeAll()
+}
+
 /// The current row must wrap, never ellipsize; context rows stay one line.
 func checkWrapping(_ variant: String, geometry: NotchGeometry) {
     let longText = "Sisa dunia seakan berputar ke arah yang sebaliknya dan aku terdiam"   // 458 pt: 2 rows
@@ -542,8 +749,8 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
     check(two.allSatisfy { NotchText.width(of: $0, font: NotchStyle.currentFont) <= column }, "\(variant): both rows fit the column")
 
     // The card grows by exactly one row relative to a one-line current line.
-    let oneRowHeight = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: false).height
-    let twoRowsHeight = NotchStyle.expandedSize(for: geometry, currentLine: longText, showsTransport: false).height
+    let oneRowHeight = NotchStyle.expandedSize(for: geometry, window: window(current: "And nothing else matters"), showsTransport: false).height
+    let twoRowsHeight = NotchStyle.expandedSize(for: geometry, window: window(current: longText), showsTransport: false).height
     check(
         abs((twoRowsHeight - oneRowHeight) - (NotchStyle.lineHeight + NotchStyle.wrappedLineSpacing)) < 0.5,
         "\(variant): the card grows by exactly one wrapped row (\(Int(oneRowHeight)) -> \(Int(twoRowsHeight)) pt)"
@@ -610,9 +817,15 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
     }
     check(three.count == 2, "\(variant): a too-long line stays at 2 rows")
     check(three.last?.hasSuffix("…") == true, "\(variant): the second row is the ellipsized fallback")
+    let fallbackLayout = NotchCardLayout.make(
+        for: window(current: hugeText),
+        width: NotchStyle.maxWidth,
+        contentTop: 0,
+        showsTransport: false
+    )
     check(
-        NotchStyle.currentLineCount(hugeText) == 2,
-        "\(variant): the height math also stops at 2 rows"
+        fallbackLayout.rows.first { $0.slot == NotchStyle.rowRadius }?.lines.count == 2,
+        "\(variant): the canonical layout also stops at 2 rows"
     )
     // From a clean expanded state, so the grace timer from the pin toggles above
     // cannot leave the card collapsed while it is being measured.
@@ -637,11 +850,153 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
     seeks.removeAll()
 }
 
+/// Presents a window of the current song while the card is being driven.
+func presentWindow(_ window: LyricsWindow, geometry: NotchGeometry) {
+    controller.present(
+        LyricsPresentation(window: window, isTimingExact: true, trackKey: "preview", artwork: colorfulArtwork(), playback: .playing),
+        geometry: geometry,
+        isObscured: false
+    )
+}
+
+/// Puts the card in the state the footer lives in: pinned on the base window.
+func pinBaseWindow(_ variant: String, geometry: NotchGeometry) {
+    controller.dismiss()
+    controller.present(presentation(.playing), geometry: geometry, isObscured: false)
+    wait(0.15)
+    controller.setHovered(true)
+    wait(0.5)
+    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    wait(0.4)
+    check(controller.isPinned, "\(variant): the pinned footer fixture is pinned")
+}
+
+func unpinBaseWindow() {
+    controller.click(at: NSPoint(x: 4, y: card().bounds.midY))
+    wait(0.6)
+    controller.dismiss()
+    seeks.removeAll()
+}
+
+/// The pinned footer: a hairline inset to the text margins, a real gap to the
+/// controls, a band that owns its clicks, and a frame that contains all of it.
+/// Driven from the canonical layout, not from a copy of its arithmetic.
+func checkFooterAndArtwork(_ variant: String, geometry: NotchGeometry) {
+    let contentTop = NotchStyle.contentTop(for: geometry)
+    let layout = NotchCardLayout.make(
+        for: window(current: "And nothing else matters"),
+        width: NotchStyle.maxWidth,
+        contentTop: contentTop,
+        showsTransport: true
+    )
+    guard let separator = layout.separator, let footer = layout.footer else {
+        check(false, "\(variant): the pinned layout has a separator and a footer")
+        return
+    }
+    print("[\(variant)] divider \(describe(separator)) footer \(describe(footer))")
+
+    let inset = separator.minX
+    let rightInset = layout.size.width - separator.maxX
+    check(abs(inset - rightInset) < 0.5 && abs(inset - NotchStyle.horizontalPadding) < 0.5,
+          "\(variant): the divider is inset \(Int(inset)) pt on each side")
+    check(separator.height == NotchStyle.separatorHeight, "\(variant): the divider is a hairline")
+    let targetTop = layout.transport.map(\.rect.minY).min() ?? 0
+    let gap = targetTop - separator.maxY
+    check(abs(gap - NotchStyle.footerGap) < 0.5, "\(variant): the divider sits \(Int(gap)) pt above the controls")
+    check(gap >= 8 && gap <= 10, "\(variant): that gap is inside the 8-10 pt asked for")
+    check(!layout.rows.contains { $0.rect.intersects(separator) }, "\(variant): the divider never crosses a lyric row")
+    check(!layout.transport.contains { $0.rect.intersects(separator) }, "\(variant): the divider never crosses a target")
+    check(layout.rows.allSatisfy { $0.rect.maxY <= separator.minY }, "\(variant): the lyric block stays above the divider")
+    check(footer.minY == separator.minY, "\(variant): the footer band starts at the divider")
+    check(abs(footer.maxY - (layout.size.height - NotchStyle.verticalPadding)) < 0.5,
+          "\(variant): the footer ends at the bottom padding")
+    check(abs(layout.size.height - NotchStyle.expandedSize(for: geometry, window: window(current: "And nothing else matters"), showsTransport: true).height) < 0.5,
+          "\(variant): the frame height is the same layout's size")
+
+    // Artwork polish: the slot and gutter that define the wrap width are kept.
+    check(layout.artwork.width == NotchStyle.artworkSize && layout.artwork.height == NotchStyle.artworkSize,
+          "\(variant): the cover slot is still \(Int(NotchStyle.artworkSize)) pt")
+    check(layout.artwork.maxY <= separator.minY, "\(variant): the cover stays in the lyric section above the divider")
+    let rowsMid = ((layout.rows.first?.rect.minY ?? 0) + (layout.rows.last?.rect.maxY ?? 0)) / 2
+    check(abs(layout.artwork.midY - rowsMid) <= 1, "\(variant): the cover is centred against the lyric block")
+
+    // The live card: pinned, the layout's height, and the divider is a dead zone.
+    pinBaseWindow(variant, geometry: geometry)
+    check(abs(card().bounds.height - layout.size.height) < 0.5, "\(variant): the card on screen is that layout's height")
+    let pinnedBefore = controller.isPinned
+    let seeksBefore = seeks.count
+    let commandsBefore = transports.count
+    controller.click(at: NSPoint(x: separator.midX, y: separator.midY))
+    check(controller.isPinned == pinnedBefore, "\(variant): clicking the divider does not pin or unpin")
+    check(seeks.count == seeksBefore, "\(variant): clicking the divider does not seek")
+    check(transports.count == commandsBefore, "\(variant): clicking the divider sends no transport command")
+    snapshot("\(variant)-pinned", geometry: geometry)
+    unpinBaseWindow()
+}
+
+/// An already-pinned card keeps its pin while the window changes shape under it
+/// (five rows -> intro -> wrapped): the frame hugs the content and the footer
+/// never falls outside it. This is the transition a user actually sees.
+func checkPinnedTransitions(_ variant: String, geometry: NotchGeometry) {
+    let intro = introWindow()
+    let wrapped = window(current: "Sisa dunia seakan berputar ke arah yang sebaliknya dan aku terdiam")
+
+    func pinnedHeight(_ window: LyricsWindow) -> CGFloat {
+        NotchStyle.expandedSize(for: geometry, window: window, showsTransport: true).height
+    }
+    func checkFrame(_ name: String, window: LyricsWindow) {
+        let expected = pinnedHeight(window)
+        check(controller.isPinned, "\(variant): \(name) keeps the pin")
+        check(abs(panel().frame.height - expected) < 0.5,
+              "\(variant): \(name) pinned height hugs its rows (\(Int(panel().frame.height)) vs \(Int(expected)) pt)")
+        let live = NotchCardLayout.make(
+            for: window,
+            width: card().bounds.width,
+            contentTop: NotchStyle.contentTop(for: geometry),
+            showsTransport: true
+        )
+        guard let footer = live.footer, let play = live.transport.first(where: { $0.command == .playPause })?.rect else {
+            check(false, "\(variant): \(name) has a footer")
+            return
+        }
+        check(footer.maxY <= card().bounds.height - NotchStyle.verticalPadding + 0.5,
+              "\(variant): \(name) footer stays inside the frame")
+        check(cardView().transportCommand(at: NSPoint(x: play.midX, y: play.midY)) == .playPause,
+              "\(variant): \(name) controls are still live")
+        check(cardView().isInTransportRow(NSPoint(x: 1, y: footer.midY)),
+              "\(variant): \(name) footer band is still reachable at the card edge")
+    }
+
+    pinBaseWindow(variant, geometry: geometry)
+    let fiveRows = panel().frame.height
+
+    presentWindow(intro, geometry: geometry)
+    wait(0.4)
+    checkFrame("the intro window", window: intro)
+    check(panel().frame.height < fiveRows, "\(variant): the pinned card shrinks for the intro (\(Int(fiveRows)) -> \(Int(panel().frame.height)) pt)")
+    snapshot("\(variant)-pinned-intro", geometry: geometry)
+
+    presentWindow(wrapped, geometry: geometry)
+    wait(0.4)
+    checkFrame("the wrapped window", window: wrapped)
+    check(panel().frame.height > fiveRows, "\(variant): the wrapped line makes the pinned card taller (\(Int(fiveRows)) -> \(Int(panel().frame.height)) pt)")
+    snapshot("\(variant)-pinned-wrapped", geometry: geometry)
+    unpinBaseWindow()
+}
+
 checkPolicy()
 renderSequence("simulated", geometry: syntheticGeometry(simulated: true))
 renderSequence("hardware", geometry: syntheticGeometry(simulated: false))
+checkIntroFixture("simulated", geometry: syntheticGeometry(simulated: true))
+checkIntroFixture("hardware", geometry: syntheticGeometry(simulated: false))
+checkFewRowsBalance("simulated", geometry: syntheticGeometry(simulated: true))
+checkFewRowsBalance("hardware", geometry: syntheticGeometry(simulated: false))
 checkWrapping("simulated", geometry: syntheticGeometry(simulated: true))
 checkWrapping("hardware", geometry: syntheticGeometry(simulated: false))
+checkFooterAndArtwork("simulated", geometry: syntheticGeometry(simulated: true))
+checkFooterAndArtwork("hardware", geometry: syntheticGeometry(simulated: false))
+checkPinnedTransitions("simulated", geometry: syntheticGeometry(simulated: true))
+checkPinnedTransitions("hardware", geometry: syntheticGeometry(simulated: false))
 
 print(failures == 0 ? "PASS: all checks passed" : "FAIL: \(failures) check(s) failed")
 exit(failures == 0 ? 0 : 1)

@@ -55,15 +55,6 @@ final class NotchCardView: NSView {
 
     var isSimulated = true { didSet { if oldValue != isSimulated { needsDisplay = true } } }
 
-    /// One drawable expanded row. The current row can be taller than the others
-    /// because its text wraps, so rows are laid out once and then both drawn and
-    /// hit-tested from these rects — never from a pitch.
-    private struct Row {
-        let slot: Int
-        let rect: NSRect
-        let lines: [String]
-    }
-
     /// Set while the card is pinned: the transport row is the reward for
     /// pinning and is never shown for a mere hover.
     var showsTransport = false {
@@ -82,12 +73,10 @@ final class NotchCardView: NSView {
         }
     }
 
-    private var rowLayout: [Row] = []
-    private var artworkRect: NSRect = .zero
-    /// Transport targets, laid out once with the rows: the single place a click
-    /// is matched to a button.
-    private var transportLayout: [(command: TransportCommand, rect: NSRect)] = []
-    private var transportRowRect: NSRect = .zero
+    /// The one geometry of the expanded card: rows, artwork, separator, footer
+    /// and size, all from `NotchCardLayout`. Drawing and hit testing read this,
+    /// never a second copy of the arithmetic.
+    private var layout: NotchCardLayout?
 
     var onHoverChanged: ((Bool) -> Void)?
     var onClick: ((NSPoint) -> Void)?
@@ -158,76 +147,25 @@ final class NotchCardView: NSView {
 
     // MARK: - Layout
 
-    /// Lays the expanded rows out once per content, width or state change. The
-    /// collapsed card and the dot need no rows.
+    /// Lays the expanded card out once per content, width or state change. All
+    /// the arithmetic lives in `NotchCardLayout.make`, which the controller also
+    /// uses to size the window.
     private func updateLayout() {
-        guard isExpanded else {
-            rowLayout = []
-            artworkRect = .zero
-            return
-        }
-        let columnX = NotchStyle.horizontalPadding + NotchStyle.artworkSize + NotchStyle.artworkGap
-        let columnWidth = NotchStyle.textColumnWidth(for: bounds.width)
-        var y = contentTop + NotchStyle.verticalPadding
-        var rows: [Row] = []
-        for slot in 0...(NotchStyle.rowRadius * 2) {
-            let line = line(at: slot)
-            let isCurrent = slot == NotchStyle.rowRadius
-            let lines: [String]
-            if isCurrent {
-                lines = NotchText.wrapped(
-                    line?.text ?? "",
-                    font: NotchStyle.currentFont,
-                    to: columnWidth,
-                    maxRows: NotchStyle.currentLineRows
-                )
-            } else {
-                lines = line.map { [$0.text] } ?? []
-            }
-            let height = NotchStyle.rowHeight(slot: slot, currentLineCount: lines.count)
-            rows.append(Row(
-                slot: slot,
-                rect: NSRect(x: columnX, y: y, width: columnWidth, height: height),
-                lines: lines
-            ))
-            y += height + NotchStyle.lineSpacing
-        }
-        rowLayout = rows
-
-        let top = rows.first?.rect.minY ?? (contentTop + NotchStyle.verticalPadding)
-        let bottom = rows.last?.rect.maxY ?? top
-        artworkRect = NSRect(
-            x: NotchStyle.horizontalPadding,
-            y: (top + bottom) / 2 - NotchStyle.artworkSize / 2,
-            width: NotchStyle.artworkSize,
-            height: NotchStyle.artworkSize
-        )
-
-        transportLayout = []
-        transportRowRect = .zero
-        guard showsTransport else { return }
-        let rowRect = NSRect(x: 0, y: bottom, width: bounds.width, height: NotchStyle.transportRowHeight)
-        transportRowRect = rowRect
-        let target = NotchStyle.transportButtonSize
-        let stride = target + NotchStyle.transportGap
-        let firstX = bounds.midX - NotchStyle.transportWidth / 2
-        let commands: [TransportCommand] = [.previous, .playPause, .next]
-        transportLayout = commands.enumerated().map { index, command in
-            (command, NSRect(
-                x: firstX + CGFloat(index) * stride,
-                y: rowRect.midY - target / 2,
-                width: target,
-                height: target
-            ))
-        }
+        layout = isExpanded
+            ? NotchCardLayout.make(
+                for: lyrics,
+                width: bounds.width,
+                contentTop: contentTop,
+                showsTransport: showsTransport
+            )
+            : nil
     }
 
     /// Slot under a card-space point, or nil for a miss: padding, the artwork,
     /// the spacings between rows, the glass strip. A hit must be inside a row's
     /// own rect, so clicking a gap never seeks to a neighbouring line.
     func slot(at point: NSPoint) -> Int? {
-        guard isExpanded else { return nil }
-        return rowLayout.first { $0.rect.contains(point) }?.slot
+        layout?.rows.first { $0.rect.contains(point) }?.slot
     }
 
     func line(at slot: Int) -> LyricLine? {
@@ -237,14 +175,13 @@ final class NotchCardView: NSView {
 
     /// The button under a point, matched against the laid-out targets.
     func transportCommand(at point: NSPoint) -> TransportCommand? {
-        guard isExpanded, showsTransport else { return nil }
-        return transportLayout.first { $0.rect.contains(point) }?.command
+        layout?.transport.first { $0.rect.contains(point) }?.command
     }
 
     /// True anywhere inside the transport band, including the gaps between the
     /// targets. A click there must do nothing at all — not pin, not seek.
     func isInTransportRow(_ point: NSPoint) -> Bool {
-        isExpanded && showsTransport && transportRowRect.contains(point)
+        layout?.footer?.contains(point) ?? false
     }
 
     // MARK: - Drawing
@@ -307,8 +244,9 @@ final class NotchCardView: NSView {
     }
 
     private func drawExpanded() {
-        drawArtwork()
-        for row in rowLayout {
+        guard let layout else { return }
+        drawArtwork(in: layout.artwork)
+        for row in layout.rows {
             let isCurrent = row.slot == NotchStyle.rowRadius
             guard !row.lines.isEmpty else { continue }
             if isCurrent {
@@ -331,14 +269,25 @@ final class NotchCardView: NSView {
                 drawLine(row.lines[0], in: row.rect, isCurrent: false)
             }
         }
-        drawTransport()
+        if let separator = layout.separator {
+            drawSeparator(separator)
+        }
+        drawTransport(layout.transport)
     }
 
-    private func drawTransport() {
+    /// A faint hairline that separates the lyric block from the controls; it is
+    /// inset to the text margins so it reads as part of the composition.
+    private func drawSeparator(_ rect: NSRect) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        NotchStyle.separatorColor.setFill()
+        NSBezierPath(rect: rect).fill()
+    }
+
+    private func drawTransport(_ targets: [(command: TransportCommand, rect: NSRect)]) {
         guard showsTransport else { return }
         let config = NSImage.SymbolConfiguration(pointSize: NotchStyle.transportGlyphSize, weight: .medium)
             .applying(NSImage.SymbolConfiguration(paletteColors: [NotchStyle.transportColor]))
-        for (command, rect) in transportLayout {
+        for (command, rect) in targets {
             guard let symbol = NSImage(
                 systemSymbolName: NotchStyle.transportSymbol(command, playback: playback),
                 accessibilityDescription: nil
@@ -358,8 +307,7 @@ final class NotchCardView: NSView {
         }
     }
 
-    private func drawArtwork() {
-        let rect = artworkRect
+    private func drawArtwork(in rect: NSRect) {
         let box = NSBezierPath(
             roundedRect: rect,
             xRadius: NotchStyle.artworkCornerRadius,
@@ -384,6 +332,9 @@ final class NotchCardView: NSView {
                 ),
                 withAttributes: attributes
             )
+            NotchStyle.artworkEdge.setStroke()
+            box.lineWidth = 1
+            box.stroke()
             return
         }
 
@@ -400,6 +351,10 @@ final class NotchCardView: NSView {
             height: size.height
         ))
         NSGraphicsContext.restoreGraphicsState()
+        // Edge on top of the cover: a dark sleeve still reads as a tile.
+        NotchStyle.artworkEdge.setStroke()
+        box.lineWidth = 1
+        box.stroke()
     }
 
     private func drawLine(_ text: String?, in rect: NSRect, isCurrent: Bool) {
