@@ -55,13 +55,11 @@ final class NotchCardView: NSView {
 
     var isSimulated = true { didSet { if oldValue != isSimulated { needsDisplay = true } } }
 
-    /// Set while the card is pinned: the transport row is the reward for
-    /// pinning and is never shown for a mere hover.
-    var showsTransport = false {
+    /// The controller owns pin state; the button renders it.
+    var isPinned = false {
         didSet {
-            guard oldValue != showsTransport else { return }
-            updateLayout()
-            needsDisplay = true
+            guard oldValue != isPinned else { return }
+            updatePinButton()
         }
     }
 
@@ -81,6 +79,42 @@ final class NotchCardView: NSView {
     var onHoverChanged: ((Bool) -> Void)?
     var onClick: ((NSPoint) -> Void)?
     var onRightClick: ((NSPoint) -> Void)?
+    var onPinToggle: (() -> Void)?
+
+    /// A native button provides mouse-up tracking, a tooltip and accessibility.
+    let pinButton = NSButton()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        pinButton.setButtonType(.pushOnPushOff)
+        pinButton.bezelStyle = .recessed
+        pinButton.imagePosition = .imageOnly
+        pinButton.imageScaling = .scaleProportionallyDown
+        // The card stays black even when the rest of macOS uses light mode.
+        pinButton.appearance = NSAppearance(named: .darkAqua)
+        pinButton.contentTintColor = .white
+        pinButton.refusesFirstResponder = true
+        pinButton.target = self
+        pinButton.action = #selector(togglePin(_:))
+        pinButton.setAccessibilityLabel("Keep lyrics open")
+        addSubview(pinButton)
+        updatePinButton()
+        updateLayout()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func updatePinButton() {
+        pinButton.state = isPinned ? .on : .off
+        pinButton.image = NSImage(systemSymbolName: isPinned ? "pin.fill" : "pin", accessibilityDescription: nil)
+        pinButton.toolTip = isPinned ? "Unpin lyrics" : "Pin lyrics open"
+    }
+
+    @objc private func togglePin(_ sender: NSButton) {
+        onPinToggle?()
+    }
 
     /// nil while the surface is a dot: there is nothing to say right now.
     private var lyrics: LyricsWindow?
@@ -155,10 +189,13 @@ final class NotchCardView: NSView {
             ? NotchCardLayout.make(
                 for: lyrics,
                 width: bounds.width,
-                contentTop: contentTop,
-                showsTransport: showsTransport
+                contentTop: contentTop
             )
             : nil
+        pinButton.isHidden = layout == nil
+        if let layout {
+            pinButton.frame = layout.pinButton
+        }
     }
 
     /// Slot under a card-space point, or nil for a miss: padding, the artwork,
@@ -181,7 +218,7 @@ final class NotchCardView: NSView {
     /// True anywhere inside the transport band, including the gaps between the
     /// targets. A click there must do nothing at all — not pin, not seek.
     func isInTransportRow(_ point: NSPoint) -> Bool {
-        layout?.footer?.contains(point) ?? false
+        layout?.footer.contains(point) ?? false
     }
 
     // MARK: - Drawing
@@ -269,9 +306,7 @@ final class NotchCardView: NSView {
                 drawLine(row.lines[0], in: row.rect, isCurrent: false)
             }
         }
-        if let separator = layout.separator {
-            drawSeparator(separator)
-        }
+        drawSeparator(layout.separator)
         drawTransport(layout.transport)
     }
 
@@ -284,7 +319,6 @@ final class NotchCardView: NSView {
     }
 
     private func drawTransport(_ targets: [(command: TransportCommand, rect: NSRect)]) {
-        guard showsTransport else { return }
         let config = NSImage.SymbolConfiguration(pointSize: NotchStyle.transportGlyphSize, weight: .medium)
             .applying(NSImage.SymbolConfiguration(paletteColors: [NotchStyle.transportColor]))
         for (command, rect) in targets {

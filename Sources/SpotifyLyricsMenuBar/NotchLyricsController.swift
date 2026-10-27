@@ -52,6 +52,11 @@ final class NotchLyricsController: NSObject {
         card.onHoverChanged = { [weak self] hovered in self?.setHovered(hovered) }
         card.onClick = { [weak self] point in self?.click(at: point) }
         card.onRightClick = { [weak self] point in self?.requestMenu(at: point) }
+        card.onPinToggle = { [weak self] in
+            guard let self else { return }
+            self.isPinned.toggle()
+            self.apply(self.resolvedPresence())
+        }
     }
 
     deinit {
@@ -139,7 +144,7 @@ final class NotchLyricsController: NSObject {
         currentPresence = target
 
         card.isExpanded = target == .expanded
-        card.showsTransport = isPinned
+        card.isPinned = isPinned
         card.playback = presentation.playback
         if let geometry {
             card.isSimulated = geometry.isSimulated
@@ -181,8 +186,7 @@ final class NotchLyricsController: NSObject {
         case .expanded:
             size = NotchStyle.expandedSize(
                 for: geometry,
-                window: presentation.window,
-                showsTransport: isPinned
+                window: presentation.window
             )
         case .collapsed:
             size = NotchStyle.collapsedSize(for: geometry, text: currentLine)
@@ -274,8 +278,8 @@ final class NotchLyricsController: NSObject {
     // MARK: - Clicks
 
     /// A click in card coordinates. A dot opens the menu: the status item is
-    /// hidden in notch mode, so it is the only way back. The current line or
-    /// padding pins, another line seeks when the timing is exact.
+    /// hidden in notch mode, so it is the only way back. Surrounding lines seek
+    /// when the timing is exact; the pin button owns pinning exclusively.
     func click(at point: NSPoint) {
         guard panel.isVisible else { return }
         if currentPresence == .dot {
@@ -295,11 +299,7 @@ final class NotchLyricsController: NSObject {
               let line = card.line(at: slot),
               !line.text.isEmpty,
               slot != NotchStyle.rowRadius
-        else {
-            isPinned.toggle()
-            apply(resolvedPresence())
-            return
-        }
+        else { return }
         guard presentation.isTimingExact, line.timestamp > 0 else { return }
         onSeek?(line.timestamp)
     }
