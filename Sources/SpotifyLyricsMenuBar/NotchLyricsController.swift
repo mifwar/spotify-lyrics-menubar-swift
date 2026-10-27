@@ -7,6 +7,12 @@ enum Presence {
     case hidden, dot, collapsed, expanded
 }
 
+/// Transport intent from the card. The surface never talks to the player: it
+/// reports what was clicked and the app decides what that means.
+enum TransportCommand {
+    case playPause, next, previous
+}
+
 /// Draws the current lyric on the notch, expands while hovered or pinned, and
 /// shrinks to a dot when there is nothing to say. Main thread only, like every
 /// AppKit surface.
@@ -15,6 +21,8 @@ final class NotchLyricsController: NSObject {
     var onSeek: ((TimeInterval) -> Void)?
     /// Called with screen coordinates when the card or the dot asks for the menu.
     var onMenuRequest: ((NSPoint) -> Void)?
+    /// Called when the card's transport buttons are clicked.
+    var onTransport: ((TransportCommand) -> Void)?
 
     private(set) var isPinned = false
 
@@ -137,6 +145,8 @@ final class NotchLyricsController: NSObject {
         currentPresence = target
 
         card.isExpanded = target == .expanded
+        card.showsTransport = isPinned
+        card.playback = presentation.playback
         if let geometry {
             card.isSimulated = geometry.isSimulated
             card.contentTop = NotchStyle.contentTop(for: geometry)
@@ -175,7 +185,11 @@ final class NotchLyricsController: NSObject {
         let size: NSSize
         switch presence {
         case .expanded:
-            size = NotchStyle.expandedSize(for: geometry, currentLine: currentLine)
+            size = NotchStyle.expandedSize(
+                for: geometry,
+                currentLine: currentLine,
+                showsTransport: isPinned
+            )
         case .collapsed:
             size = NotchStyle.collapsedSize(for: geometry, text: currentLine)
         case .dot:
@@ -272,6 +286,14 @@ final class NotchLyricsController: NSObject {
         guard panel.isVisible else { return }
         if currentPresence == .dot {
             requestMenu(at: point)
+            return
+        }
+        // The transport band owns every click inside it, including its gaps: a
+        // near-miss must do nothing rather than pin or seek.
+        if currentPresence == .expanded, card.isInTransportRow(point) {
+            if let command = card.transportCommand(at: point) {
+                onTransport?(command)
+            }
             return
         }
         guard currentPresence == .expanded,

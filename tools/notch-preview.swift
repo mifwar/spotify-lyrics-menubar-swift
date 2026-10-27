@@ -63,6 +63,8 @@ let controller = NotchLyricsController()
 var seeks: [TimeInterval] = []
 var menuPoints: [NSPoint] = []
 controller.onSeek = { seeks.append($0) }
+var transports: [TransportCommand] = []
+controller.onTransport = { transports.append($0) }
 controller.onMenuRequest = { menuPoints.append($0) }
 
 func panel() -> NSPanel {
@@ -188,11 +190,131 @@ func snapshot(_ name: String, geometry: NotchGeometry) {
         // The caller names any path; make it instead of failing every render
         // on a fresh directory, which reads like a code failure.
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        try png.write(to: outputDirectory.appendingPathComponent("T16-\(name).png"))
-        print("wrote T16-\(name).png (\(Int(cardImage.size.width))×\(Int(cardImage.size.height)) card)")
+        try png.write(to: outputDirectory.appendingPathComponent("T18-\(name).png"))
+        print("wrote T18-\(name).png (\(Int(cardImage.size.width))×\(Int(cardImage.size.height)) card)")
     } catch {
         check(false, "could not write \(name): \(error.localizedDescription)")
     }
+}
+
+/// Hover is for reading, pin is for controlling: the transport row exists only
+/// while pinned, and once there it owns the whole band.
+///
+/// The harness discovers the targets by probing instead of recomputing their
+/// positions: the only arithmetic it may do is measure what the card laid out.
+func checkPinnedTransport(_ variant: String, geometry: NotchGeometry) {
+    let view = cardView()
+    check(view.showsTransport, "\(variant): the pinned card shows transport")
+    check(view.isExpanded, "\(variant): the pinned card is expanded")
+
+    // Every 1 pt probe that reports a command, grouped into bounding boxes.
+    var boxes: [TransportCommand: NSRect] = [:]
+    for y in stride(from: 0.0, through: view.bounds.height, by: 1.0) {
+        for x in stride(from: 0.0, through: view.bounds.width, by: 1.0) {
+            guard let command = view.transportCommand(at: NSPoint(x: x, y: y)) else { continue }
+            boxes[command] = boxes[command]?.union(NSRect(x: x, y: y, width: 1, height: 1))
+                ?? NSRect(x: x, y: y, width: 1, height: 1)
+        }
+    }
+    let expected: [TransportCommand] = [.previous, .playPause, .next]
+    check(Set(boxes.keys) == Set(expected), "\(variant): all three transport targets are reachable")
+
+    for command in expected {
+        guard let box = boxes[command] else {
+            check(false, "\(variant): \(command) has no target")
+            continue
+        }
+        let centre = NSPoint(x: box.midX, y: box.midY)
+        check(
+            abs(box.width - NotchStyle.transportButtonSize) <= 1 && abs(box.height - NotchStyle.transportButtonSize) <= 1,
+            "\(variant): \(command) target is \(Int(box.width))×\(Int(box.height)) pt"
+        )
+        check(view.transportCommand(at: centre) == command, "\(variant): \(command) centre maps to itself")
+        check(view.isInTransportRow(centre), "\(variant): \(command) is inside the transport band")
+    }
+
+    let ordered = expected.compactMap { boxes[$0] }
+    if ordered.count == 3 {
+        check(ordered[0].maxX < ordered[1].minX && ordered[1].maxX < ordered[2].minX,
+              "\(variant): previous, play/pause and next sit left to right")
+        let gap = ordered[1].minX - ordered[0].maxX
+        print("[\(variant)] transport targets: \(ordered.map { "\(Int($0.minX))-\(Int($0.maxX))" }.joined(separator: ", ")), gap \(Int(gap)) pt")
+        check(gap > NotchStyle.transportButtonSize,
+              "\(variant): the gap (\(Int(gap)) pt) is wider than a target (\(Int(NotchStyle.transportButtonSize)) pt)")
+        let gapPoint = NSPoint(x: ordered[0].maxX + gap / 2, y: ordered[0].midY)
+        check(view.transportCommand(at: gapPoint) == nil, "\(variant): the gap between targets hits no button")
+        check(view.isInTransportRow(gapPoint), "\(variant): the gap is still inside the transport band")
+
+        // Clicking a button reports its command and changes nothing else.
+        let pinnedBefore = controller.isPinned
+        let seeksBefore = seeks.count
+        controller.click(at: NSPoint(x: ordered[0].midX, y: ordered[0].midY))
+        check(transports.last == .previous, "\(variant): clicking previous reports previous")
+        check(controller.isPinned == pinnedBefore, "\(variant): a button click does not unpin")
+        check(seeks.count == seeksBefore, "\(variant): a button click does not seek")
+
+        // Clicking a gap does nothing at all: no command, no pin flip, no seek.
+        let commandsBefore = transports.count
+        controller.click(at: gapPoint)
+        check(transports.count == commandsBefore, "\(variant): clicking a gap sends no command")
+        check(controller.isPinned == pinnedBefore, "\(variant): clicking a gap does not unpin")
+        check(seeks.count == seeksBefore, "\(variant): clicking a gap does not seek")
+    }
+
+    // The glyph follows the player: pause while playing, play while paused.
+    check(
+        NotchStyle.transportSymbol(.playPause, playback: .playing) == "pause.fill",
+        "\(variant): playing shows pause"
+    )
+    check(
+        NotchStyle.transportSymbol(.playPause, playback: .paused) == "play.fill",
+        "\(variant): paused shows play"
+    )
+    check(NotchStyle.transportSymbol(.previous, playback: .playing) == "backward.fill", "\(variant): previous glyph")
+    check(NotchStyle.transportSymbol(.next, playback: .playing) == "forward.fill", "\(variant): next glyph")
+    check(view.playback == .playing, "\(variant): the card knows the current playback state")
+
+    // The glyph is drawn from that state: a paused player shows play, even with
+    // the pin holding the card open.
+    if variant == "simulated" {
+        controller.present(presentation(.paused), geometry: geometry, isObscured: false)
+        wait(0.15)
+        check(view.playback == .paused, "\(variant): the paused card knows the playback state")
+        snapshot("\(variant)-pinned-paused", geometry: geometry)
+        controller.present(presentation(.playing), geometry: geometry, isObscured: false)
+        wait(0.15)
+    }
+}
+
+/// While pinned the card grows by exactly the transport row, and its height
+/// math stays the single source of truth.
+func checkPinnedHeight(_ variant: String, geometry: NotchGeometry) {
+    let view = cardView()
+    let expanded = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: false)
+    let pinned = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: true)
+    check(
+        abs((pinned.height - expanded.height) - NotchStyle.transportRowHeight) < 0.5,
+        "\(variant): the card grows by exactly the transport row (\(Int(expanded.height)) -> \(Int(pinned.height)) pt)"
+    )
+    check(
+        abs(view.bounds.height - pinned.height) < 0.5,
+        "\(variant): the pinned window matches the transport height (\(Int(view.bounds.height)) pt)"
+    )
+}
+
+/// Hover-expanded cards must have no transport row at all.
+func checkHoverHasNoTransport(_ variant: String, geometry: NotchGeometry) {
+    let view = cardView()
+    check(!view.showsTransport, "\(variant): a hover-expanded card shows no transport")
+    let rowTop = view.bounds.height - NotchStyle.transportRowHeight
+    let centre = NSPoint(x: view.bounds.midX, y: rowTop + NotchStyle.transportRowHeight / 2)
+    check(view.transportCommand(at: centre) == nil, "\(variant): no button is hit without pinning")
+    check(!view.isInTransportRow(centre), "\(variant): no transport band without pinning")
+    let expected = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: false)
+    check(
+        abs(view.bounds.height - expected.height) < 0.5,
+        "\(variant): hover height has no transport row (\(Int(view.bounds.height)) pt)"
+    )
 }
 
 /// The policy is pure, so its whole truth table is checked directly instead of
@@ -257,6 +379,7 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     print("[\(variant)] expanded  \(describe(expanded))")
     check(expanded.width > collapsed.width, "\(variant): hover grows the card wider")
     check(expanded.height > collapsed.height, "\(variant): hover grows the card downward")
+    checkHoverHasNoTransport("\(variant)", geometry: geometry)
     snapshot("\(variant)-expanded", geometry: geometry)
 
     // 3. A click on an earlier line seeks to its timestamp.
@@ -274,6 +397,8 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     wait(0.9)
     check(controller.isPinned, "\(variant): pin survives the pointer leaving")
     check(panel().frame.height > collapsed.height, "\(variant): pinned card stays expanded")
+    checkPinnedTransport("\(variant)", geometry: geometry)
+    checkPinnedHeight("\(variant)", geometry: geometry)
     snapshot("\(variant)-pinned", geometry: geometry)
 
     // 5. Unpinning with the pointer away collapses after the grace period.
@@ -358,6 +483,7 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     )
 
     // 12. Dismiss really stops rendering, unlike an obscure.
+    transports.removeAll()
     controller.dismiss()
     wait(0.15)
     check(!panel().isVisible, "\(variant): dismiss stops rendering")
@@ -416,8 +542,8 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
     check(two.allSatisfy { NotchText.width(of: $0, font: NotchStyle.currentFont) <= column }, "\(variant): both rows fit the column")
 
     // The card grows by exactly one row relative to a one-line current line.
-    let oneRowHeight = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters").height
-    let twoRowsHeight = NotchStyle.expandedSize(for: geometry, currentLine: longText).height
+    let oneRowHeight = NotchStyle.expandedSize(for: geometry, currentLine: "And nothing else matters", showsTransport: false).height
+    let twoRowsHeight = NotchStyle.expandedSize(for: geometry, currentLine: longText, showsTransport: false).height
     check(
         abs((twoRowsHeight - oneRowHeight) - (NotchStyle.lineHeight + NotchStyle.wrappedLineSpacing)) < 0.5,
         "\(variant): the card grows by exactly one wrapped row (\(Int(oneRowHeight)) -> \(Int(twoRowsHeight)) pt)"

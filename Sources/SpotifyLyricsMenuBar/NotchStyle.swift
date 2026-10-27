@@ -30,6 +30,15 @@ enum NotchStyle {
     static let currentLineRows = 2
     static let wrappedLineSpacing: CGFloat = 1
 
+    /// Transport controls. The target is 20 pt and the spacing between targets
+    /// is deliberately wider than a target, so a near-miss inside the row lands
+    /// on nothing instead of on a neighbour's track.
+    static let transportButtonSize: CGFloat = 20
+    static let transportGap: CGFloat = 28
+    static let transportGlyphSize: CGFloat = 15
+    static let transportRowHeight: CGFloat = 8 + transportButtonSize
+    static let transportColor = NSColor.white.withAlphaComponent(0.85)
+
     static let currentFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
     static let lineFont = NSFont.systemFont(ofSize: 13)
     static let artworkFont = NSFont.systemFont(ofSize: 28)
@@ -89,9 +98,32 @@ enum NotchStyle {
         )
     }
 
-    static func expandedSize(for geometry: NotchGeometry, currentLine: String) -> NSSize {
+    /// Width of the three transport targets plus the gaps between them.
+    static var transportWidth: CGFloat {
+        CGFloat(3) * transportButtonSize + CGFloat(2) * transportGap
+    }
+
+    /// The glyph for a button. Paused and stopped both offer play: pressing it
+    /// is the way back to playing. The card draws from this and the harness
+    /// checks it, so the two can never disagree.
+    static func transportSymbol(_ command: TransportCommand, playback: PlaybackState) -> String {
+        switch command {
+        case .previous: return "backward.fill"
+        case .next: return "forward.fill"
+        case .playPause: return playback == .playing ? "pause.fill" : "play.fill"
+        }
+    }
+
+    static func expandedSize(
+        for geometry: NotchGeometry,
+        currentLine: String,
+        showsTransport: Bool
+    ) -> NSSize {
         let rowCount = max(1, currentLineCount(currentLine))
-        let contentHeight = max(rowsHeight(currentLineCount: rowCount), artworkSize) + 2 * verticalPadding
+        var contentHeight = max(rowsHeight(currentLineCount: rowCount), artworkSize) + 2 * verticalPadding
+        if showsTransport {
+            contentHeight += transportRowHeight
+        }
         return NSSize(width: maxWidth, height: contentTop(for: geometry) + contentHeight)
     }
 }
