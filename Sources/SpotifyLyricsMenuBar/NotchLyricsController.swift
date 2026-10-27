@@ -171,12 +171,13 @@ final class NotchLyricsController: NSObject {
     private func frame(for presence: Presence) -> NSRect? {
         guard let geometry else { return nil }
         let notch = geometry.notchFrame
+        let currentLine = presentation.window?.current?.text ?? ""
         let size: NSSize
         switch presence {
         case .expanded:
-            size = NotchStyle.expandedSize(for: geometry)
+            size = NotchStyle.expandedSize(for: geometry, currentLine: currentLine)
         case .collapsed:
-            size = NotchStyle.collapsedSize(for: geometry, text: presentation.window?.current?.text ?? "")
+            size = NotchStyle.collapsedSize(for: geometry, text: currentLine)
         case .dot:
             size = NSSize(width: NotchStyle.dotHitSize, height: NotchStyle.dotHitSize)
         case .hidden:

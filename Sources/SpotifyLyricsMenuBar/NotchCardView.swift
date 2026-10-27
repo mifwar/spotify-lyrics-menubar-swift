@@ -35,11 +35,37 @@ final class NotchPanel: NSPanel {
 /// click can be mapped to the row under the cursor. The view knows only whether
 /// it is expanded — what the surface is *doing* is the controller's business.
 final class NotchCardView: NSView {
-    var isExpanded = false { didSet { if oldValue != isExpanded { needsDisplay = true } } }
+    var isExpanded = false {
+        didSet {
+            guard oldValue != isExpanded else { return }
+            updateLayout()
+            needsDisplay = true
+        }
+    }
+
     /// Distance from the card's top to the first drawable row: the hardware
     /// cutout's height, or zero on a simulated notch.
-    var contentTop: CGFloat = 0 { didSet { if oldValue != contentTop { needsDisplay = true } } }
+    var contentTop: CGFloat = 0 {
+        didSet {
+            guard oldValue != contentTop else { return }
+            updateLayout()
+            needsDisplay = true
+        }
+    }
+
     var isSimulated = true { didSet { if oldValue != isSimulated { needsDisplay = true } } }
+
+    /// One drawable expanded row. The current row can be taller than the others
+    /// because its text wraps, so rows are laid out once and then both drawn and
+    /// hit-tested from these rects — never from a pitch.
+    private struct Row {
+        let slot: Int
+        let rect: NSRect
+        let lines: [String]
+    }
+
+    private var rowLayout: [Row] = []
+    private var artworkRect: NSRect = .zero
 
     var onHoverChanged: ((Bool) -> Void)?
     var onClick: ((NSPoint) -> Void)?
@@ -58,7 +84,13 @@ final class NotchCardView: NSView {
         guard newArtwork !== artwork || !hasSameLines(as: newLyrics) else { return }
         lyrics = newLyrics
         artwork = newArtwork
+        updateLayout()
         needsDisplay = true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateLayout()
     }
 
     private func hasSameLines(as other: LyricsWindow?) -> Bool {
@@ -102,53 +134,85 @@ final class NotchCardView: NSView {
         onRightClick?(convert(event.locationInWindow, from: nil))
     }
 
-    // MARK: - Hit testing
+    // MARK: - Layout
 
-    /// Column the lyric rows occupy, beside the artwork.
-    private var textColumn: NSRect {
-        let left = NotchStyle.horizontalPadding + NotchStyle.artworkSize + NotchStyle.artworkGap
-        return NSRect(
-            x: left,
-            y: contentTop + NotchStyle.verticalPadding,
-            width: max(0, bounds.width - left - NotchStyle.horizontalPadding),
-            height: NotchStyle.rowsHeight
+    /// Lays the expanded rows out once per content, width or state change. The
+    /// collapsed card and the dot need no rows.
+    private func updateLayout() {
+        guard isExpanded else {
+            rowLayout = []
+            artworkRect = .zero
+            return
+        }
+        let columnX = NotchStyle.horizontalPadding + NotchStyle.artworkSize + NotchStyle.artworkGap
+        let columnWidth = NotchStyle.textColumnWidth(for: bounds.width)
+        var y = contentTop + NotchStyle.verticalPadding
+        var rows: [Row] = []
+        for slot in 0...(NotchStyle.rowRadius * 2) {
+            let line = line(at: slot)
+            let isCurrent = slot == NotchStyle.rowRadius
+            let lines: [String]
+            if isCurrent {
+                lines = NotchText.wrapped(
+                    line?.text ?? "",
+                    font: NotchStyle.currentFont,
+                    to: columnWidth,
+                    maxRows: NotchStyle.currentLineRows
+                )
+            } else {
+                lines = line.map { [$0.text] } ?? []
+            }
+            let height = NotchStyle.rowHeight(slot: slot, currentLineCount: lines.count)
+            rows.append(Row(
+                slot: slot,
+                rect: NSRect(x: columnX, y: y, width: columnWidth, height: height),
+                lines: lines
+            ))
+            y += height + NotchStyle.lineSpacing
+        }
+        rowLayout = rows
+
+        let top = rows.first?.rect.minY ?? (contentTop + NotchStyle.verticalPadding)
+        let bottom = rows.last?.rect.maxY ?? top
+        artworkRect = NSRect(
+            x: NotchStyle.horizontalPadding,
+            y: (top + bottom) / 2 - NotchStyle.artworkSize / 2,
+            width: NotchStyle.artworkSize,
+            height: NotchStyle.artworkSize
         )
     }
 
-    /// Slot under a card-space point. nil means padding (artwork, gaps, margins,
-    /// the glass strip), which pins instead of seeking.
+    /// Slot under a card-space point, or nil for a miss: padding, the artwork,
+    /// the spacings between rows, the glass strip. A hit must be inside a row's
+    /// own rect, so clicking a gap never seeks to a neighbouring line.
     func slot(at point: NSPoint) -> Int? {
-        guard isExpanded, textColumn.contains(point) else { return nil }
-        let pitch = NotchStyle.lineHeight + NotchStyle.lineSpacing
-        let offset = point.y - textColumn.minY
-        let slot = Int(offset / pitch)
-        guard slot >= 0, slot <= NotchStyle.rowRadius * 2 else { return nil }
-        guard offset - CGFloat(slot) * pitch <= NotchStyle.lineHeight else { return nil }
-        return slot
+        guard isExpanded else { return nil }
+        return rowLayout.first { $0.rect.contains(point) }?.slot
     }
 
     func line(at slot: Int) -> LyricLine? {
-        rows.indices.contains(slot) ? rows[slot] : nil
+        let rows = windowRows
+        return rows.indices.contains(slot) ? rows[slot] : nil
     }
 
     // MARK: - Drawing
 
     /// The slots within the visible radius, current line in the middle.
-    private var rows: [LyricLine?] {
+    private var windowRows: [LyricLine?] {
         lyrics?.rows(radius: NotchStyle.rowRadius) ?? []
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let rows = rows
+        let rows = windowRows
         if !isExpanded, rows.isEmpty {
             drawDot()
             return
         }
         drawCard()
         if isExpanded {
-            drawRows(rows)
+            drawExpanded()
         } else {
-            drawLine(lyrics?.current, in: lineRect(), isCurrent: true)
+            drawLine(lyrics?.current?.text, in: lineRect(), isCurrent: true)
         }
     }
 
@@ -190,31 +254,35 @@ final class NotchCardView: NSView {
         )
     }
 
-    private func drawRows(_ rows: [LyricLine?]) {
+    private func drawExpanded() {
         drawArtwork()
-        let pitch = NotchStyle.lineHeight + NotchStyle.lineSpacing
-        for (slot, line) in rows.enumerated() {
-            let isCurrent = slot == NotchStyle.rowRadius
-            drawLine(
-                line,
-                in: NSRect(
-                    x: textColumn.minX,
-                    y: textColumn.minY + CGFloat(slot) * pitch,
-                    width: textColumn.width,
-                    height: NotchStyle.lineHeight
-                ),
-                isCurrent: isCurrent
-            )
+        for row in rowLayout {
+            let isCurrent = row.slot == NotchStyle.rowRadius
+            guard !row.lines.isEmpty else { continue }
+            if isCurrent {
+                // Wrapped rows are already exact; drawing them back through
+                // `fitted` would re-truncate what the wrap just made fit.
+                let font = NotchStyle.currentFont
+                let lineHeight = ceil(font.ascender - font.descender)
+                for (index, text) in row.lines.enumerated() {
+                    let y = row.rect.minY + CGFloat(index) * (NotchStyle.lineHeight + NotchStyle.wrappedLineSpacing)
+                    drawText(
+                        text,
+                        in: NSRect(x: row.rect.minX, y: y, width: row.rect.width, height: NotchStyle.lineHeight),
+                        font: font,
+                        color: NotchStyle.currentColor,
+                        fitted: false,
+                        visualLineHeight: lineHeight
+                    )
+                }
+            } else {
+                drawLine(row.lines[0], in: row.rect, isCurrent: false)
+            }
         }
     }
 
     private func drawArtwork() {
-        let rect = NSRect(
-            x: NotchStyle.horizontalPadding,
-            y: textColumn.midY - NotchStyle.artworkSize / 2,
-            width: NotchStyle.artworkSize,
-            height: NotchStyle.artworkSize
-        )
+        let rect = artworkRect
         let box = NSBezierPath(
             roundedRect: rect,
             xRadius: NotchStyle.artworkCornerRadius,
@@ -257,20 +325,46 @@ final class NotchCardView: NSView {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    private func drawLine(_ line: LyricLine?, in rect: NSRect, isCurrent: Bool) {
-        guard let text = line?.text, !text.isEmpty, rect.width > 0 else { return }
+    private func drawLine(_ text: String?, in rect: NSRect, isCurrent: Bool) {
+        guard let text, !text.isEmpty, rect.width > 0 else { return }
         let font = isCurrent ? NotchStyle.currentFont : NotchStyle.lineFont
+        drawText(
+            text,
+            in: rect,
+            font: font,
+            color: isCurrent ? NotchStyle.currentColor : NotchStyle.lineColor,
+            fitted: true,
+            visualLineHeight: ceil(font.ascender - font.descender)
+        )
+    }
+
+    /// Centres one visual line in `rect`. `fitted` tail-ellipsizes to the rect's
+    /// width; wrapped rows have already been split and pass it off.
+    private func drawText(
+        _ text: String,
+        in rect: NSRect,
+        font: NSFont,
+        color: NSColor,
+        fitted shouldFit: Bool,
+        visualLineHeight: CGFloat
+    ) {
+        guard !text.isEmpty, rect.width > 0 else { return }
         let style = NSMutableParagraphStyle()
         style.alignment = .center
         style.lineBreakMode = .byClipping
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: isCurrent ? NotchStyle.currentColor : NotchStyle.lineColor,
+            .foregroundColor: color,
             .paragraphStyle: style,
         ]
-        let lineHeight = ceil(font.ascender - font.descender)
-        (NotchText.fitted(text, font: font, to: rect.width) as NSString).draw(
-            in: NSRect(x: rect.minX, y: rect.midY - lineHeight / 2, width: rect.width, height: lineHeight),
+        let display = shouldFit ? NotchText.fitted(text, font: font, to: rect.width) : text
+        (display as NSString).draw(
+            in: NSRect(
+                x: rect.minX,
+                y: rect.midY - visualLineHeight / 2,
+                width: rect.width,
+                height: visualLineHeight
+            ),
             withAttributes: attributes
         )
     }
