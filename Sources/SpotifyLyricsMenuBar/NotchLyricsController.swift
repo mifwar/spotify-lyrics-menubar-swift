@@ -17,6 +17,8 @@ final class NotchLyricsController: NSObject {
     var onMenuRequest: ((NSPoint) -> Void)?
     /// Called when the card's transport buttons are clicked.
     var onTransport: ((TransportCommand) -> Void)?
+    /// Called with a track position in seconds when the progress bar is clicked.
+    var onScrub: ((TimeInterval) -> Void)?
 
     private(set) var isPinned = false
 
@@ -25,6 +27,9 @@ final class NotchLyricsController: NSObject {
     private static let watchdogInterval: TimeInterval = 0.25
     private static let idleDelay: TimeInterval = 3
     private static let idlePollInterval: TimeInterval = 0.5
+    /// Often enough for the elapsed time to tick on the second and the bar to
+    /// move smoothly at card width; the card extrapolates between polls.
+    private static let progressInterval: TimeInterval = 0.5
 
     private let panel: NotchPanel
     private let card: NotchCardView
@@ -42,6 +47,7 @@ final class NotchLyricsController: NSObject {
     private var hoverTimer: Timer?
     private var watchdogTimer: Timer?
     private var idleTimer: Timer?
+    private var progressTimer: Timer?
 
     override init() {
         let card = NotchCardView(frame: .zero)
@@ -146,6 +152,7 @@ final class NotchLyricsController: NSObject {
         card.isExpanded = target == .expanded
         card.isPinned = isPinned
         card.playback = presentation.playback
+        card.nowPlaying = target == .dot ? nil : presentation.nowPlaying
         if let geometry {
             card.isSimulated = geometry.isSimulated
             card.contentTop = NotchStyle.contentTop(for: geometry)
@@ -214,6 +221,12 @@ final class NotchLyricsController: NSObject {
         watchdogTimer = clock(watchdogTimer, every: watchdog) { $0.watchdogTick() }
         let idle = presence == .collapsed && presentation.playback == .paused ? Self.idlePollInterval : nil
         idleTimer = clock(idleTimer, every: idle) { $0.idleTick() }
+        let showsProgress = (presence == .expanded || presence == .collapsed)
+            && presentation.playback == .playing
+            && presentation.nowPlaying != nil
+        progressTimer = clock(progressTimer, every: showsProgress ? Self.progressInterval : nil) {
+            $0.card.needsDisplay = true
+        }
     }
 
     /// Starts, keeps or stops one repeating clock, so no transition can leave a
@@ -286,10 +299,12 @@ final class NotchLyricsController: NSObject {
             requestMenu(at: point)
             return
         }
-        // The transport band owns every click inside it, including its gaps: a
-        // near-miss must do nothing rather than pin or seek.
-        if currentPresence == .expanded, card.isInTransportRow(point) {
-            if let command = card.transportCommand(at: point) {
+        // The footer owns every click inside it, including its gaps: the bar
+        // seeks the track, a target sends its command, a near-miss does nothing.
+        if currentPresence == .expanded, card.isInFooter(point) {
+            if let fraction = card.progressFraction(at: point) {
+                scrub(to: fraction)
+            } else if let command = card.transportCommand(at: point) {
                 onTransport?(command)
             }
             return
@@ -302,6 +317,16 @@ final class NotchLyricsController: NSObject {
         else { return }
         guard presentation.isTimingExact, line.timestamp > 0 else { return }
         onSeek?(line.timestamp)
+    }
+
+    /// Seeks the track and moves the bar at once, instead of leaving it where
+    /// it was until the next poll (which never comes while paused).
+    private func scrub(to fraction: CGFloat) {
+        guard let nowPlaying = presentation.nowPlaying, nowPlaying.duration > 0 else { return }
+        let seconds = TimeInterval(fraction) * nowPlaying.duration
+        presentation.nowPlaying = nowPlaying.seeked(to: seconds)
+        apply(resolvedPresence())
+        onScrub?(seconds)
     }
 
     private func requestMenu(at point: NSPoint) {
@@ -324,8 +349,10 @@ final class NotchLyricsController: NSObject {
         hoverTimer?.invalidate()
         watchdogTimer?.invalidate()
         idleTimer?.invalidate()
+        progressTimer?.invalidate()
         hoverTimer = nil
         watchdogTimer = nil
         idleTimer = nil
+        progressTimer = nil
     }
 }

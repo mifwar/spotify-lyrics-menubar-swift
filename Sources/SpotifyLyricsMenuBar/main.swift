@@ -142,6 +142,9 @@ private final class SpotifyLyricsApp: NSObject, NSApplicationDelegate, NSPopover
         notchController.onTransport = { [weak self] command in
             self?.engine.perform(command)
         }
+        notchController.onScrub = { [weak self] seconds in
+            self?.engine.seekPlayback(to: seconds)
+        }
         // Fullscreen, screen arrangement and app switches change the answer to
         // "is the pill obscured" without any lyric update.
         let workspaceCenter = NSWorkspace.shared.notificationCenter
