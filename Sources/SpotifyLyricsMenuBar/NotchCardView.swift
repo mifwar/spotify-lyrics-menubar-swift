@@ -6,6 +6,13 @@ final class NotchPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
+    /// AppKit scales the resize animation with the distance travelled, which
+    /// for a hover expand is long enough to watch an empty card shrink. The
+    /// card is a glance surface: keep every resize short.
+    override func animationResizeTime(_ newFrame: NSRect) -> TimeInterval {
+        0.12
+    }
+
     static func make(card: NotchCardView) -> NotchPanel {
         let panel = NotchPanel(
             contentRect: NSRect(x: 0, y: 0, width: NotchStyle.maxWidth, height: NotchStyle.collapsedLineHeight),
@@ -71,9 +78,18 @@ final class NotchCardView: NSView {
         }
     }
 
-    /// The one geometry of the expanded card: rows, artwork, separator, footer
-    /// and size, all from `NotchCardLayout`. Drawing and hit testing read this,
-    /// never a second copy of the arithmetic.
+    /// The track and its playhead. The card runs the clock forward itself, so
+    /// the controller only has to ask for a redraw while it plays.
+    var nowPlaying: NowPlaying? {
+        didSet {
+            guard oldValue != nowPlaying else { return }
+            needsDisplay = true
+        }
+    }
+
+    /// The one geometry of the expanded card: header, rows, footer and size,
+    /// all from `NotchCardLayout`. Drawing and hit testing read this, never a
+    /// second copy of the arithmetic.
     private var layout: NotchCardLayout?
 
     var onHoverChanged: ((Bool) -> Void)?
@@ -215,10 +231,20 @@ final class NotchCardView: NSView {
         layout?.transport.first { $0.rect.contains(point) }?.command
     }
 
-    /// True anywhere inside the transport band, including the gaps between the
-    /// targets. A click there must do nothing at all — not pin, not seek.
-    func isInTransportRow(_ point: NSPoint) -> Bool {
+    /// True anywhere inside the footer band (progress row and transports),
+    /// including the gaps between targets. A click there must never pin or seek
+    /// to a line.
+    func isInFooter(_ point: NSPoint) -> Bool {
         layout?.footer.contains(point) ?? false
+    }
+
+    /// 0...1 along the progress track under a point, or nil when the point is
+    /// not on the track (or there is no track to seek in).
+    func progressFraction(at point: NSPoint) -> CGFloat? {
+        guard let layout, let nowPlaying, nowPlaying.duration > 0,
+              layout.progressHitArea.contains(point),
+              layout.progressBar.width > 0 else { return nil }
+        return min(1, max(0, (point.x - layout.progressBar.minX) / layout.progressBar.width))
     }
 
     // MARK: - Drawing
@@ -235,11 +261,47 @@ final class NotchCardView: NSView {
             return
         }
         drawCard()
-        if isExpanded {
-            drawExpanded()
-        } else {
-            drawLine(lyrics?.current?.text, in: lineRect(), isCurrent: true)
+        // One clock reading per frame, so the bar and the time always agree.
+        let playhead = nowPlaying.flatMap { track -> (position: TimeInterval, duration: TimeInterval)? in
+            guard track.duration > 0 else { return nil }
+            return (track.position(at: Date(), playing: playback == .playing), track.duration)
         }
+        if isExpanded {
+            drawExpanded(playhead: playhead)
+        } else {
+            drawLine(lyrics?.current?.text, in: lineRect(), color: NotchStyle.currentColor, isCurrent: true)
+            if let playhead {
+                drawCollapsedProgress(fraction: CGFloat(playhead.position / playhead.duration))
+            }
+        }
+    }
+
+    /// A hairline along the pill's bottom edge, inside the text margins so it
+    /// never meets the rounded corners.
+    private func drawCollapsedProgress(fraction: CGFloat) {
+        let track = NSRect(
+            x: NotchStyle.horizontalPadding,
+            y: bounds.maxY - NotchStyle.bottomPadding / 2 - NotchStyle.collapsedProgressHeight / 2,
+            width: max(0, bounds.width - 2 * NotchStyle.horizontalPadding),
+            height: NotchStyle.collapsedProgressHeight
+        )
+        drawProgress(
+            in: track,
+            fraction: fraction,
+            track: NotchStyle.collapsedProgressTrackColor,
+            fill: NotchStyle.collapsedProgressFillColor
+        )
+    }
+
+    private func drawProgress(in rect: NSRect, fraction: CGFloat, track: NSColor, fill: NSColor) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        let radius = rect.height / 2
+        track.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+        let filled = NSRect(x: rect.minX, y: rect.minY, width: rect.width * min(1, max(0, fraction)), height: rect.height)
+        guard filled.width > 0 else { return }
+        fill.setFill()
+        NSBezierPath(roundedRect: filled, xRadius: radius, yRadius: radius).fill()
     }
 
     private func drawCard() {
@@ -280,9 +342,10 @@ final class NotchCardView: NSView {
         )
     }
 
-    private func drawExpanded() {
+    private func drawExpanded(playhead: (position: TimeInterval, duration: TimeInterval)?) {
         guard let layout else { return }
         drawArtwork(in: layout.artwork)
+        drawHeader(layout)
         for row in layout.rows {
             let isCurrent = row.slot == NotchStyle.rowRadius
             guard !row.lines.isEmpty else { continue }
@@ -303,25 +366,63 @@ final class NotchCardView: NSView {
                     )
                 }
             } else {
-                drawLine(row.lines[0], in: row.rect, isCurrent: false)
+                drawLine(row.lines[0], in: row.rect, color: NotchStyle.contextLineColor(slot: row.slot))
             }
         }
-        drawSeparator(layout.separator)
+        if let playhead {
+            drawFooterProgress(layout, position: playhead.position, duration: playhead.duration)
+        }
         drawTransport(layout.transport)
     }
 
-    /// A faint hairline that separates the lyric block from the controls; it is
-    /// inset to the text margins so it reads as part of the composition.
-    private func drawSeparator(_ rect: NSRect) {
-        guard rect.width > 0, rect.height > 0 else { return }
-        NotchStyle.separatorColor.setFill()
-        NSBezierPath(rect: rect).fill()
+    /// Title over artist, left-aligned against the cover. With no track the
+    /// header still names the app's source, so a pinned empty card reads.
+    private func drawHeader(_ layout: NotchCardLayout) {
+        let title = nowPlaying.map { $0.title.isEmpty ? "Spotify" : $0.title } ?? "Spotify"
+        let artist = nowPlaying?.artist ?? "Not playing"
+        drawLabel(title, in: layout.title, font: NotchStyle.titleFont, color: NotchStyle.titleColor)
+        drawLabel(artist, in: layout.artist, font: NotchStyle.artistFont, color: NotchStyle.artistColor)
+    }
+
+    /// Elapsed time, the track, the duration. Without a known duration the row
+    /// stays empty rather than drawing a bar that can never move.
+    private func drawFooterProgress(_ layout: NotchCardLayout, position: TimeInterval, duration: TimeInterval) {
+        drawProgress(
+            in: layout.progressBar,
+            fraction: CGFloat(position / duration),
+            track: NotchStyle.progressTrackColor,
+            fill: NotchStyle.progressFillColor
+        )
+        let font = NotchStyle.timeFont
+        let color = NotchStyle.timeColor
+        drawLabel(NotchStyle.formatTime(position), in: layout.elapsedLabel, font: font, color: color)
+        drawLabel(NotchStyle.formatTime(duration), in: layout.durationLabel, font: font, color: color, alignment: .right)
+    }
+
+    /// One tail-ellipsized line, vertically centred in `rect`.
+    private func drawLabel(
+        _ text: String,
+        in rect: NSRect,
+        font: NSFont,
+        color: NSColor,
+        alignment: NSTextAlignment = .left
+    ) {
+        guard !text.isEmpty, rect.width > 0 else { return }
+        let style = NSMutableParagraphStyle()
+        style.alignment = alignment
+        style.lineBreakMode = .byClipping
+        let height = ceil(font.ascender - font.descender)
+        (NotchText.fitted(text, font: font, to: rect.width) as NSString).draw(
+            in: NSRect(x: rect.minX, y: rect.midY - height / 2, width: rect.width, height: height),
+            withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: style]
+        )
     }
 
     private func drawTransport(_ targets: [(command: TransportCommand, rect: NSRect)]) {
-        let config = NSImage.SymbolConfiguration(pointSize: NotchStyle.transportGlyphSize, weight: .medium)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [NotchStyle.transportColor]))
         for (command, rect) in targets {
+            let pointSize = command == .playPause ? NotchStyle.primaryTransportGlyphSize : NotchStyle.transportGlyphSize
+            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [NotchStyle.transportColor]))
             guard let symbol = NSImage(
                 systemSymbolName: NotchStyle.transportSymbol(command, playback: playback),
                 accessibilityDescription: nil
@@ -391,14 +492,14 @@ final class NotchCardView: NSView {
         box.stroke()
     }
 
-    private func drawLine(_ text: String?, in rect: NSRect, isCurrent: Bool) {
+    private func drawLine(_ text: String?, in rect: NSRect, color: NSColor, isCurrent: Bool = false) {
         guard let text, !text.isEmpty, rect.width > 0 else { return }
         let font = isCurrent ? NotchStyle.currentFont : NotchStyle.lineFont
         drawText(
             text,
             in: rect,
             font: font,
-            color: isCurrent ? NotchStyle.currentColor : NotchStyle.lineColor,
+            color: color,
             fitted: true,
             visualLineHeight: ceil(font.ascender - font.descender)
         )

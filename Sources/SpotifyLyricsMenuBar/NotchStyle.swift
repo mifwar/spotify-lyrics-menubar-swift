@@ -12,17 +12,18 @@ enum NotchStyle {
     static let bottomPadding: CGFloat = 6
     static let lineHeight: CGFloat = 19
     static let lineSpacing: CGFloat = 3
-    static let verticalPadding: CGFloat = 10
-    /// The cover slot keeps the waveform of the lyric column: 44 pt of artwork
-    /// and a 14 pt gutter sit to the left of the lyric column. The pin and its
-    /// gap reserve the right edge; each is excluded when measuring text.
-    static let artworkSize: CGFloat = 44
-    static let artworkGap: CGFloat = 14
+    static let verticalPadding: CGFloat = 12
+    /// The header is a now-playing row: the cover, then title over artist, with
+    /// the pin at the right edge. The lyric block hangs below it at full width,
+    /// so the line being read gets the whole card instead of a side column.
+    static let artworkSize: CGFloat = 40
+    static let artworkGap: CGFloat = 12
+    static let headerGap: CGFloat = 12
     static let pinButtonSize: CGFloat = 24
     static let pinButtonGap: CGFloat = 8
     /// Slightly squarer than a squircle at this size: a restrained tile next to
     /// the 16 pt card, not a pill.
-    static let artworkCornerRadius: CGFloat = 6
+    static let artworkCornerRadius: CGFloat = 8
     static let cornerRadius: CGFloat = 16
 
     /// The dot's window is bigger than the dot so a click can find it.
@@ -37,30 +38,55 @@ enum NotchStyle {
     static let currentLineRows = 2
     static let wrappedLineSpacing: CGFloat = 1
 
-    /// Transport controls. The target is 20 pt and the spacing between targets
+    /// Transport controls. The target is 22 pt and the spacing between targets
     /// is deliberately wider than a target, so a near-miss inside the row lands
     /// on nothing instead of on a neighbour's track.
-    static let transportButtonSize: CGFloat = 20
-    static let transportGap: CGFloat = 28
-    static let transportGlyphSize: CGFloat = 15
-    static let transportColor = NSColor.white.withAlphaComponent(0.85)
+    static let transportButtonSize: CGFloat = 22
+    static let transportGap: CGFloat = 30
+    static let transportGlyphSize: CGFloat = 14
+    /// Play/pause is the primary control and reads a size up from its neighbours.
+    static let primaryTransportGlyphSize: CGFloat = 19
+    static let transportColor = NSColor.white.withAlphaComponent(0.9)
 
-    /// The expanded footer is its own band under the lyric block: a hairline, a
-    /// gap, then the transports. The spacing is explicit here instead of being
-    /// borrowed from a font's leading, so a font change cannot re-space it.
-    static let footerTopGap: CGFloat = 10
-    static let separatorHeight: CGFloat = 1
-    static let separatorColor = NSColor.white.withAlphaComponent(0.12)
-    static let footerGap: CGFloat = 9
+    /// The footer is its own band under the lyric block: elapsed time, a
+    /// progress track and the duration, then the transports. The spacing is
+    /// explicit here instead of being borrowed from a font's leading, so a font
+    /// change cannot re-space it.
+    static let footerTopGap: CGFloat = 12
+    static let progressRowHeight: CGFloat = 12
+    static let progressBarHeight: CGFloat = 4
+    /// A thin track is hard to hit; clicks within this distance of it count.
+    static let progressHitSlop: CGFloat = 5
+    /// Room for "1:00:00" in the time font; the bar runs between the two labels.
+    static let timeLabelWidth: CGFloat = 40
+    static let timeLabelGap: CGFloat = 8
+    static let footerGap: CGFloat = 8
     static var footerHeight: CGFloat {
-        footerTopGap + separatorHeight + footerGap + transportButtonSize
+        footerTopGap + progressRowHeight + footerGap + transportButtonSize
     }
+
+    static let progressTrackColor = NSColor.white.withAlphaComponent(0.18)
+    static let progressFillColor = NSColor.white.withAlphaComponent(0.9)
+    /// The collapsed pill carries the same progress as a quiet hairline under
+    /// the lyric, so the song's position is readable without hovering.
+    static let collapsedProgressHeight: CGFloat = 2
+    static let collapsedProgressTrackColor = NSColor.white.withAlphaComponent(0.1)
+    static let collapsedProgressFillColor = NSColor.white.withAlphaComponent(0.45)
 
     static let currentFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
     static let lineFont = NSFont.systemFont(ofSize: 13)
-    static let artworkFont = NSFont.systemFont(ofSize: 22)
+    static let artworkFont = NSFont.systemFont(ofSize: 20)
     static let currentColor = NSColor.white
     static let lineColor = NSColor.white.withAlphaComponent(0.55)
+    /// Two lines away from the current one: further back, so the block reads
+    /// as fading out from the line being sung.
+    static let farLineColor = NSColor.white.withAlphaComponent(0.3)
+    static let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    static let artistFont = NSFont.systemFont(ofSize: 12)
+    static let titleColor = NSColor.white
+    static let artistColor = NSColor.white.withAlphaComponent(0.55)
+    static let timeFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+    static let timeColor = NSColor.white.withAlphaComponent(0.55)
     static let dotColor = NSColor.white.withAlphaComponent(0.85)
     static let artworkFill = NSColor.white.withAlphaComponent(0.1)
     /// A hairline edge so a very dark cover still reads as a tile on the black
@@ -75,10 +101,33 @@ enum NotchStyle {
         geometry.isSimulated ? 0 : geometry.notchFrame.height
     }
 
-    /// Width of the lyric column in a card `width` wide: the side paddings and
-    /// the artwork slot are not available to text.
+    /// Width of the lyric column in a card `width` wide: everything but the
+    /// side paddings, since the cover lives in the header above it.
     static func textColumnWidth(for width: CGFloat) -> CGFloat {
-        max(0, width - 2 * horizontalPadding - artworkSize - artworkGap - pinButtonGap - pinButtonSize)
+        max(0, width - 2 * horizontalPadding)
+    }
+
+    /// Where the first lyric row may start: below the cutout, the top padding,
+    /// the now-playing header and the gap under it.
+    static func lyricsTop(contentTop: CGFloat) -> CGFloat {
+        contentTop + verticalPadding + artworkSize + headerGap
+    }
+
+    /// Lines further from the current one fade further back.
+    static func contextLineColor(slot: Int) -> NSColor {
+        abs(slot - rowRadius) >= 2 ? farLineColor : lineColor
+    }
+
+    /// "m:ss", or "h:mm:ss" past an hour. Negative and non-finite read as 0:00.
+    static func formatTime(_ seconds: TimeInterval) -> String {
+        let total = seconds.isFinite ? max(0, Int(seconds.rounded(.down))) : 0
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%d:%02d", minutes, secs)
     }
 
     /// Height of one expanded row. Only the current row grows, and only by the
@@ -138,9 +187,9 @@ enum NotchStyle {
     }
 }
 
-/// One computed geometry for the expanded card: the rows with their wrapped
-/// text, the artwork slot, the playback footer (separator and transport targets)
-/// and the size the panel must be.
+/// One computed geometry for the expanded card: the now-playing header (cover,
+/// title and artist, pin), the lyric rows with their wrapped text, the playback
+/// footer (progress and transport targets) and the size the panel must be.
 ///
 /// Both the controller (which sizes the window) and the view (which draws and
 /// hit-tests it) call `make`, so padding, wrapping and the footer cannot make
@@ -158,28 +207,57 @@ struct NotchCardLayout {
     let size: NSSize
     let rows: [Row]
     let artwork: NSRect
+    /// Title over artist, between the cover and the pin.
+    let title: NSRect
+    let artist: NSRect
     let pinButton: NSRect
-    /// The hairline above the transport targets.
-    let separator: NSRect
-    /// The whole footer band, separator to the bottom of the targets: a click
-    /// anywhere in it belongs to the footer, never to a pin or a seek.
+    /// The progress track, and the time labels either side of it.
+    let progressBar: NSRect
+    let elapsedLabel: NSRect
+    let durationLabel: NSRect
+    /// The whole footer band, progress row to the bottom of the targets: a click
+    /// anywhere in it belongs to the footer, never to a pin or a seek to a line.
     let footer: NSRect
     let transport: [(command: TransportCommand, rect: NSRect)]
 
+    /// The track plus its slop, so a thin bar can still be clicked.
+    var progressHitArea: NSRect {
+        progressBar.insetBy(dx: -NotchStyle.progressHitSlop, dy: -NotchStyle.progressHitSlop)
+    }
+
     /// Only the rows the window has text for are laid out — empty slots at the
     /// ends would otherwise reserve space and leave a song's first lines sitting
-    /// near the bottom of the card — and the block is centred vertically inside
-    /// the content area, with the artwork centred against it.
+    /// near the bottom of the card. The header and footer are fixed bands, so
+    /// the card only ever grows or shrinks by its lyric rows.
     static func make(
         for window: LyricsWindow?,
         width: CGFloat,
         contentTop: CGFloat
     ) -> NotchCardLayout {
-        let columnX = NotchStyle.horizontalPadding + NotchStyle.artworkSize + NotchStyle.artworkGap
+        let padding = NotchStyle.horizontalPadding
         let columnWidth = NotchStyle.textColumnWidth(for: width)
         let windowRows = window?.rows(radius: NotchStyle.rowRadius) ?? []
         let slots = NotchStyle.visibleSlots(in: window)
 
+        // Header: cover on the left, pin on the right, title over artist
+        // between them, the pair centred against the cover.
+        let headerTop = contentTop + NotchStyle.verticalPadding
+        let artwork = NSRect(x: padding, y: headerTop, width: NotchStyle.artworkSize, height: NotchStyle.artworkSize)
+        let pinButton = NSRect(
+            x: width - padding - NotchStyle.pinButtonSize,
+            y: artwork.midY - NotchStyle.pinButtonSize / 2,
+            width: NotchStyle.pinButtonSize,
+            height: NotchStyle.pinButtonSize
+        )
+        let textX = artwork.maxX + NotchStyle.artworkGap
+        let textWidth = max(0, pinButton.minX - NotchStyle.pinButtonGap - textX)
+        let titleHeight = ceil(NotchStyle.titleFont.ascender - NotchStyle.titleFont.descender)
+        let artistHeight = ceil(NotchStyle.artistFont.ascender - NotchStyle.artistFont.descender)
+        let textBlockTop = artwork.midY - (titleHeight + 2 + artistHeight) / 2
+        let title = NSRect(x: textX, y: textBlockTop, width: textWidth, height: titleHeight)
+        let artist = NSRect(x: textX, y: title.maxY + 2, width: textWidth, height: artistHeight)
+
+        // Lyrics: full width under the header.
         var texts: [[String]] = []
         var heights: [CGFloat] = []
         for slot in slots {
@@ -200,36 +278,41 @@ struct NotchCardLayout {
         }
 
         let rowsHeight = heights.reduce(0, +) + CGFloat(max(0, slots.count - 1)) * NotchStyle.lineSpacing
-        let blockHeight = max(rowsHeight, NotchStyle.artworkSize)
-        let blockTop = contentTop + NotchStyle.verticalPadding
-        var y = blockTop + (blockHeight - rowsHeight) / 2
+        let lyricsTop = NotchStyle.lyricsTop(contentTop: contentTop)
+        var y = lyricsTop
         var rows: [Row] = []
         for (index, slot) in slots.enumerated() {
             rows.append(Row(
                 slot: slot,
-                rect: NSRect(x: columnX, y: y, width: columnWidth, height: heights[index]),
+                rect: NSRect(x: padding, y: y, width: columnWidth, height: heights[index]),
                 lines: texts[index]
             ))
             y += heights[index] + NotchStyle.lineSpacing
         }
 
-        let artwork = NSRect(
-            x: NotchStyle.horizontalPadding,
-            y: blockTop + blockHeight / 2 - NotchStyle.artworkSize / 2,
-            width: NotchStyle.artworkSize,
-            height: NotchStyle.artworkSize
+        // Footer: elapsed ── progress ── duration, then the transports.
+        let progressTop = lyricsTop + rowsHeight + NotchStyle.footerTopGap
+        let elapsedLabel = NSRect(
+            x: padding,
+            y: progressTop,
+            width: NotchStyle.timeLabelWidth,
+            height: NotchStyle.progressRowHeight
+        )
+        let durationLabel = NSRect(
+            x: width - padding - NotchStyle.timeLabelWidth,
+            y: progressTop,
+            width: NotchStyle.timeLabelWidth,
+            height: NotchStyle.progressRowHeight
+        )
+        let barX = elapsedLabel.maxX + NotchStyle.timeLabelGap
+        let progressBar = NSRect(
+            x: barX,
+            y: progressTop + (NotchStyle.progressRowHeight - NotchStyle.progressBarHeight) / 2,
+            width: max(0, durationLabel.minX - NotchStyle.timeLabelGap - barX),
+            height: NotchStyle.progressBarHeight
         )
 
-        let height = blockTop + blockHeight + NotchStyle.verticalPadding + NotchStyle.footerHeight
-        // The hairline lines up with the text margins, not with the card's
-        // edge, so it reads as part of the composition above it.
-        let separatorRect = NSRect(
-            x: NotchStyle.horizontalPadding,
-            y: blockTop + blockHeight + NotchStyle.footerTopGap,
-            width: max(0, width - 2 * NotchStyle.horizontalPadding),
-            height: NotchStyle.separatorHeight
-        )
-        let targetTop = separatorRect.maxY + NotchStyle.footerGap
+        let targetTop = progressTop + NotchStyle.progressRowHeight + NotchStyle.footerGap
         let stride = NotchStyle.transportButtonSize + NotchStyle.transportGap
         let firstX = width / 2 - NotchStyle.transportWidth / 2
         let commands: [TransportCommand] = [.previous, .playPause, .next]
@@ -243,22 +326,22 @@ struct NotchCardLayout {
         }
         let footer = NSRect(
             x: 0,
-            y: separatorRect.minY,
+            y: progressTop,
             width: width,
-            height: separatorRect.height + NotchStyle.footerGap + NotchStyle.transportButtonSize
+            height: targetTop + NotchStyle.transportButtonSize - progressTop
         )
+        let height = footer.maxY + NotchStyle.verticalPadding
 
         return NotchCardLayout(
             size: NSSize(width: width, height: height),
             rows: rows,
             artwork: artwork,
-            pinButton: NSRect(
-                x: width - NotchStyle.horizontalPadding - NotchStyle.pinButtonSize,
-                y: blockTop,
-                width: NotchStyle.pinButtonSize,
-                height: NotchStyle.pinButtonSize
-            ),
-            separator: separatorRect,
+            title: title,
+            artist: artist,
+            pinButton: pinButton,
+            progressBar: progressBar,
+            elapsedLabel: elapsedLabel,
+            durationLabel: durationLabel,
             footer: footer,
             transport: transport
         )

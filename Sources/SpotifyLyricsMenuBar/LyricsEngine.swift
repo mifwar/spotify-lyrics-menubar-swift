@@ -126,6 +126,12 @@ final class LyricsEngine {
         client.seek(to: target)
     }
 
+    /// Seeks the track itself to `seconds`, as a progress bar does: Spotify's
+    /// own clock, so neither the lyric offset nor the timing source applies.
+    func seekPlayback(to seconds: TimeInterval) {
+        client.seek(to: seconds)
+    }
+
     /// Transport intent from a surface. Fire-and-forget: the poller reports what
     /// Spotify actually did on the next tick, so nothing here guesses at the new
     /// state (and a paused player is not optimistically resumed — `playpause`
@@ -152,7 +158,8 @@ final class LyricsEngine {
                 title: "♪ (invalid lyrics)",
                 window: .message("Invalid clipboard lyrics"),
                 isPlaceholder: true,
-                playback: stateQueue.sync { playback }
+                playback: stateQueue.sync { playback },
+                state: state
             ))
             return
         }
@@ -226,7 +233,8 @@ final class LyricsEngine {
                         window: .message("Loading lyrics…"),
                         isPlaceholder: true,
                         trackKey: state.id,
-                        playback: .playing
+                        playback: .playing,
+                        state: state
                     ))
                     if decision.isNewTrack {
                         self.onOffsetChanged?()
@@ -248,7 +256,8 @@ final class LyricsEngine {
                             window: .message("No lyrics found"),
                             isPlaceholder: true,
                             trackKey: state.id,
-                            playback: .playing
+                            playback: .playing,
+                            state: state
                         ))
                     }
                 }
@@ -393,7 +402,8 @@ final class LyricsEngine {
         isPlaceholder: Bool = false,
         isTimingExact: Bool = false,
         trackKey: String? = nil,
-        playback: PlaybackState
+        playback: PlaybackState,
+        state: SpotifyState? = nil
     ) -> LyricsPresentation {
         LyricsPresentation(
             currentLine: title,
@@ -404,7 +414,16 @@ final class LyricsEngine {
             isTimingExact: isTimingExact,
             trackKey: trackKey,
             artwork: trackKey.flatMap { artwork.image(for: $0) },
-            playback: playback
+            playback: playback,
+            nowPlaying: state.map {
+                NowPlaying(
+                    title: $0.track,
+                    artist: $0.artist,
+                    position: $0.position,
+                    duration: $0.duration,
+                    sampledAt: Date()
+                )
+            }
         )
     }
 
@@ -417,7 +436,7 @@ final class LyricsEngine {
         }
         let playhead = state.position + snapshot.offset
         guard let line = Self.currentLine(in: snapshot.lyrics, at: playhead, trackDuration: state.duration) else {
-            return presentation(title: placeholder, window: nil, playback: playback)
+            return presentation(title: placeholder, window: nil, playback: playback, state: state)
         }
         return presentation(
             title: line.text,
@@ -426,7 +445,8 @@ final class LyricsEngine {
             lineDuration: line.duration,
             isTimingExact: snapshot.isTimingExact,
             trackKey: state.id,
-            playback: playback
+            playback: playback,
+            state: state
         )
     }
 

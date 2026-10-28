@@ -88,6 +88,37 @@ struct LyricsPresentation {
     var trackKey: String?           // artwork cache key
     var artwork: NSImage?           // nil = none, or not fetched yet
     var playback: PlaybackState = .none // Spotify's state, not the surface's
+    var nowPlaying: NowPlaying?     // nil = no track
+}
+
+/// The track itself, independent of its lyrics: what it is and where the
+/// playhead was when Spotify was last asked. Surfaces that show progress run
+/// the clock forward from `sampledAt` themselves rather than waiting for the
+/// next poll, which only arrives while there are lyrics to follow.
+struct NowPlaying: Equatable {
+    let title: String
+    let artist: String
+    let position: TimeInterval
+    let duration: TimeInterval
+    let sampledAt: Date
+
+    /// The playhead at `date`: running only while playing, never past the end.
+    func position(at date: Date, playing: Bool) -> TimeInterval {
+        let elapsed = playing ? max(0, date.timeIntervalSince(sampledAt)) : 0
+        return min(max(0, position + elapsed), max(0, duration))
+    }
+
+    /// The same track, with the playhead moved to `seconds` as of now: what a
+    /// surface shows between a seek and the poll that confirms it.
+    func seeked(to seconds: TimeInterval) -> NowPlaying {
+        NowPlaying(
+            title: title,
+            artist: artist,
+            position: min(max(0, seconds), max(0, duration)),
+            duration: duration,
+            sampledAt: Date()
+        )
+    }
 }
 
 /// Spotify's transport state. Surfaces derive their idle behaviour from it
