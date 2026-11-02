@@ -21,6 +21,8 @@
 //     Sources/SpotifyLyricsMenuBar/NotchCardView.swift \
 //     Sources/SpotifyLyricsMenuBar/NotchLyricsController.swift \
 //     tools/notch-pin-checks.swift \
+//     tools/notch-outline-checks.swift \
+//     tools/notch-header-checks.swift \
 //     build/notch-preview/main.swift
 //   ./build/notch-preview/notch-preview /Users/eros/.crew/notch-lyrics/out
 
@@ -328,7 +330,7 @@ func checkRowBand(_ variant: String, label: String, geometry: NotchGeometry) {
         check(false, "\(variant): \(label) has visible rows")
         return
     }
-    let expectedTop = NotchStyle.lyricsTop(contentTop: NotchStyle.contentTop(for: geometry))
+    let expectedTop = NotchStyle.lyricsTop(for: geometry)
     // Probes report the last point inside a row, one point short of its edge.
     let expectedBottom = panel().frame.height - NotchStyle.footerHeight - NotchStyle.verticalPadding - 1
     check(abs(top - expectedTop) <= 2, "\(variant): \(label) start at the top padding (\(Int(top)) vs \(Int(expectedTop)) pt)")
@@ -384,7 +386,7 @@ func checkPolicy() {
 
 func renderSequence(_ variant: String, geometry: NotchGeometry) {
     // Centre of the first visible row, above the current line in the middle.
-    let firstRowCenter = NotchStyle.lyricsTop(contentTop: NotchStyle.contentTop(for: geometry)) + NotchStyle.lineHeight / 2
+    let firstRowCenter = NotchStyle.lyricsTop(for: geometry) + NotchStyle.lineHeight / 2
 
     // 1. Playing: the current line only.
     controller.present(presentation(.playing), geometry: geometry, isObscured: false)
@@ -406,6 +408,7 @@ func renderSequence(_ variant: String, geometry: NotchGeometry) {
     print("[\(variant)] expanded  \(describe(expanded))")
     check(expanded.width > collapsed.width, "\(variant): hover grows the card wider")
     check(expanded.height > collapsed.height, "\(variant): hover grows the card downward")
+    checkOutline(variant, geometry: geometry)
     checkHoverTransport("\(variant)", geometry: geometry)
     snapshot("\(variant)-expanded", geometry: geometry)
 
@@ -634,7 +637,7 @@ func checkFewRowsBalance(_ variant: String, geometry: NotchGeometry) {
     let tops = probes.filter { $0.slot != nil }.map(\.y)
     if let top = tops.min(), let bottom = tops.max() {
         print("[\(variant)] few-row block: y \(Int(top))-\(Int(bottom)) in a \(Int(card().bounds.height)) pt card")
-        let expectedTop = NotchStyle.lyricsTop(contentTop: NotchStyle.contentTop(for: geometry))
+        let expectedTop = NotchStyle.lyricsTop(for: geometry)
         check(
             abs(top - expectedTop) <= 2,
             "\(variant): the visible rows are not pushed down by empty slots (top \(Int(top)) pt, expected \(Int(expectedTop)))"
@@ -657,7 +660,7 @@ func checkFewRowsBalance(_ variant: String, geometry: NotchGeometry) {
     // A single-line window is the header, one row and the footer.
     let message = LyricsWindow.message("Loading lyrics…")
     let oneHeight = NotchStyle.expandedSize(for: geometry, window: message).height
-    let oneExpected = NotchStyle.lyricsTop(contentTop: NotchStyle.contentTop(for: geometry))
+    let oneExpected = NotchStyle.lyricsTop(for: geometry)
         + NotchStyle.lineHeight + NotchStyle.footerHeight + NotchStyle.verticalPadding
     check(
         abs(oneHeight - oneExpected) < 0.5,
@@ -674,7 +677,7 @@ func checkFewRowsBalance(_ variant: String, geometry: NotchGeometry) {
     wait(0.5)
     let oneProbes = probeRows().filter { $0.slot != nil }
     if let top = oneProbes.map(\.y).min(), let bottom = oneProbes.map(\.y).max() {
-        let expectedTop = NotchStyle.lyricsTop(contentTop: NotchStyle.contentTop(for: geometry))
+        let expectedTop = NotchStyle.lyricsTop(for: geometry)
         print("[\(variant)] one-line row: y \(Int(top))-\(Int(bottom)), expected top \(Int(expectedTop))")
         check(abs(top - expectedTop) <= 2, "\(variant): a one-line row sits right under the header")
     }
@@ -707,8 +710,10 @@ func checkFewRowsBalance(_ variant: String, geometry: NotchGeometry) {
 
 /// The current row must wrap, never ellipsize; context rows stay one line.
 func checkWrapping(_ variant: String, geometry: NotchGeometry) {
-    let longText = "Sisa dunia seakan berputar ke arah yang sebaliknya dan aku terdiam"   // 458 pt: 2 rows
-    let hugeText = "Sisa dunia seakan berputar ke arah yang sebaliknya tanpa henti dan tanpa arah yang jelas sama sekali sampai lupa waktu"
+    // Sized against both columns (424 pt without ears, 564 pt with them): the
+    // long line wraps to two rows in either, the huge one needs three in either.
+    let longText = "Sisa dunia seakan berputar ke arah yang sebaliknya dan aku terdiam menunggu pagi yang tak kunjung datang"
+    let hugeText = "Sisa dunia seakan berputar ke arah yang sebaliknya tanpa henti dan tanpa arah yang jelas sama sekali sampai lupa waktu lagi dan lagi hingga malam berganti pagi tanpa ada yang peduli"
 
     func presentation(current: String) -> LyricsPresentation {
         var window = LyricsWindow.around(lyrics, at: 35)
@@ -719,9 +724,12 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
         window = LyricsWindow(lines: lines, currentIndex: window.currentIndex)
         return LyricsPresentation(window: window, isTimingExact: true, trackKey: "preview", playback: .playing)
     }
-    let column = NotchStyle.textColumnWidth(for: NotchStyle.maxWidth)
-    print("[\(variant)] text column \(Int(column)) pt, card width \(Int(NotchStyle.maxWidth)) pt")
-    check(NotchStyle.maxWidth == 460, "\(variant): expanded card is 460 pt wide")
+    let bodyWidth = NotchStyle.expandedBodyWidth(for: geometry)
+    let column = NotchStyle.textColumnWidth(for: bodyWidth)
+    print("[\(variant)] text column \(Int(column)) pt, card width \(Int(bodyWidth)) pt")
+    check(NotchStyle.maxWidth == 460, "\(variant): the card without ears is 460 pt wide")
+    check(geometry.isSimulated ? bodyWidth == 460 : bodyWidth == geometry.notchFrame.width + 2 * NotchStyle.earWidth,
+          "\(variant): a hardware card is the cutout plus two ears wide")
     check(NotchStyle.collapsedMaxWidth == 420, "\(variant): the collapsed pill still caps at 420 pt")
 
     // (a) two rows, no ellipsis anywhere.
@@ -809,7 +817,7 @@ func checkWrapping(_ variant: String, geometry: NotchGeometry) {
     let fallbackLayout = NotchCardLayout.make(
         for: window(current: hugeText),
         width: NotchStyle.maxWidth,
-        contentTop: 0
+        cutout: nil
     )
     check(
         fallbackLayout.rows.first { $0.slot == NotchStyle.rowRadius }?.lines.count == 2,
@@ -852,32 +860,35 @@ func presentWindow(_ window: LyricsWindow, geometry: NotchGeometry) {
 /// of its arithmetic.
 func checkFooterAndArtwork(_ variant: String, geometry: NotchGeometry) {
     let contentTop = NotchStyle.contentTop(for: geometry)
+    let sideInset = NotchStyle.sideInset(isSimulated: geometry.isSimulated)
     let layout = NotchCardLayout.make(
         for: window(current: "And nothing else matters"),
-        width: NotchStyle.maxWidth,
-        contentTop: contentTop
+        width: NotchStyle.expandedBodyWidth(for: geometry) + 2 * sideInset,
+        cutout: NotchStyle.cutout(for: geometry)
     )
     let bar = layout.progressBar
     let footer = layout.footer
     print("[\(variant)] progress \(describe(bar)) footer \(describe(footer))")
 
     // Header.
-    check(layout.artwork.width == NotchStyle.artworkSize && layout.artwork.height == NotchStyle.artworkSize,
-          "\(variant): the cover slot is \(Int(NotchStyle.artworkSize)) pt")
-    check(layout.artwork.minY >= contentTop, "\(variant): the cover clears the hardware cutout")
-    check(layout.title.minX >= layout.artwork.maxX && layout.title.maxX <= layout.pinButton.minX,
-          "\(variant): the title sits between the cover and the pin")
+    let inEars = !geometry.isSimulated
+    checkHeaderPlacement(variant, geometry: geometry, layout: layout)
+    if !inEars {
+        check(layout.artwork.minY >= contentTop, "\(variant): the cover clears the hardware cutout")
+        check(layout.title.minX >= layout.artwork.maxX && layout.title.maxX <= layout.pinButton.minX,
+              "\(variant): the title sits between the cover and the pin")
+    }
     check(layout.artist.minY >= layout.title.maxY, "\(variant): the artist sits under the title")
     check(abs(layout.pinButton.midY - layout.artwork.midY) < 0.5, "\(variant): the pin is centred on the header")
-    check(layout.rows.allSatisfy { $0.rect.minY >= layout.artwork.maxY + NotchStyle.headerGap - 0.5 },
+    check(layout.rows.allSatisfy { $0.rect.minY >= max(layout.artwork.maxY, contentTop) + (inEars ? NotchStyle.verticalPadding : NotchStyle.headerGap) - 0.5 },
           "\(variant): the lyric block stays under the header")
-    check(layout.rows.allSatisfy { abs($0.rect.width - NotchStyle.textColumnWidth(for: NotchStyle.maxWidth)) < 0.5 },
+    check(layout.rows.allSatisfy { abs($0.rect.width - NotchStyle.textColumnWidth(for: NotchStyle.expandedBodyWidth(for: geometry))) < 0.5 },
           "\(variant): lyric rows span the full text width")
 
     // Footer.
     let inset = layout.elapsedLabel.minX
     let rightInset = layout.size.width - layout.durationLabel.maxX
-    check(abs(inset - rightInset) < 0.5 && abs(inset - NotchStyle.horizontalPadding) < 0.5,
+    check(abs(inset - rightInset) < 0.5 && abs(inset - NotchStyle.horizontalPadding - sideInset) < 0.5,
           "\(variant): the progress row is inset \(Int(inset)) pt on each side")
     check(bar.minX > layout.elapsedLabel.maxX && bar.maxX < layout.durationLabel.minX,
           "\(variant): the bar runs between the two times")
@@ -915,7 +926,7 @@ func checkFooterAndArtwork(_ variant: String, geometry: NotchGeometry) {
 /// never falls outside it. This is the transition a user actually sees.
 func checkPinnedTransitions(_ variant: String, geometry: NotchGeometry) {
     let intro = introWindow()
-    let wrapped = window(current: "Sisa dunia seakan berputar ke arah yang sebaliknya dan aku terdiam")
+    let wrapped = window(current: "Sisa dunia seakan berputar ke arah yang sebaliknya dan aku terdiam menunggu pagi yang tak kunjung datang")
 
     func pinnedHeight(_ window: LyricsWindow) -> CGFloat {
         NotchStyle.expandedSize(for: geometry, window: window).height
@@ -928,7 +939,7 @@ func checkPinnedTransitions(_ variant: String, geometry: NotchGeometry) {
         let live = NotchCardLayout.make(
             for: window,
             width: card().bounds.width,
-            contentTop: NotchStyle.contentTop(for: geometry)
+            cutout: NotchStyle.cutout(for: geometry)
         )
         let footer = live.footer
         guard let play = live.transport.first(where: { $0.command == .playPause })?.rect else {

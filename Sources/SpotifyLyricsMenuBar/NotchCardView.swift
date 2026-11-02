@@ -50,17 +50,23 @@ final class NotchCardView: NSView {
         }
     }
 
-    /// Distance from the card's top to the first drawable row: the hardware
-    /// cutout's height, or zero on a simulated notch.
-    var contentTop: CGFloat = 0 {
+    /// The hardware cutout the card hangs from, or nil on a simulated notch.
+    /// One value, so the blank strip, the shoulders and the ear header can
+    /// never be set out of step with each other.
+    var cutout: NSSize? {
         didSet {
-            guard oldValue != contentTop else { return }
+            guard oldValue != cutout else { return }
             updateLayout()
             needsDisplay = true
         }
     }
 
-    var isSimulated = true { didSet { if oldValue != isSimulated { needsDisplay = true } } }
+    private var isSimulated: Bool { cutout == nil }
+
+    /// Distance from the card's top to the first drawable row.
+    private var contentTop: CGFloat { cutout?.height ?? 0 }
+
+    private var sideInset: CGFloat { NotchStyle.sideInset(isSimulated: isSimulated) }
 
     /// The controller owns pin state; the button renders it.
     var isPinned = false {
@@ -205,7 +211,7 @@ final class NotchCardView: NSView {
             ? NotchCardLayout.make(
                 for: lyrics,
                 width: bounds.width,
-                contentTop: contentTop
+                cutout: cutout
             )
             : nil
         pinButton.isHidden = layout == nil
@@ -279,10 +285,11 @@ final class NotchCardView: NSView {
     /// A hairline along the pill's bottom edge, inside the text margins so it
     /// never meets the rounded corners.
     private func drawCollapsedProgress(fraction: CGFloat) {
+        let line = lineRect()
         let track = NSRect(
-            x: NotchStyle.horizontalPadding,
+            x: line.minX,
             y: bounds.maxY - NotchStyle.bottomPadding / 2 - NotchStyle.collapsedProgressHeight / 2,
-            width: max(0, bounds.width - 2 * NotchStyle.horizontalPadding),
+            width: line.width,
             height: NotchStyle.collapsedProgressHeight
         )
         drawProgress(
@@ -307,12 +314,28 @@ final class NotchCardView: NSView {
     private func drawCard() {
         let radius = min(NotchStyle.cornerRadius, min(bounds.width, bounds.height) / 2)
         NSColor.black.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
-        guard !isSimulated else { return }
-        // Flush with the screen edge the top corners are square, so the card
-        // merges with the hardware cutout instead of drawing round wedges next
-        // to it. The bottom corners stay rounded.
-        NSBezierPath(rect: NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: radius)).fill()
+        if isSimulated {
+            NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        } else {
+            hardwareCardPath(bottomRadius: radius).fill()
+        }
+    }
+
+    /// Flush with the screen edge, the top corners curve outward into the top
+    /// edge so the card reads as the hardware cutout growing downward. The
+    /// bottom corners stay rounded.
+    private func hardwareCardPath(bottomRadius: CGFloat) -> NSBezierPath {
+        let shoulder = NotchStyle.shoulderRadius
+        let left = bounds.minX + shoulder
+        let right = bounds.maxX - shoulder
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: bounds.minX, y: bounds.minY))
+        path.appendArc(from: NSPoint(x: left, y: bounds.minY), to: NSPoint(x: left, y: bounds.minY + shoulder), radius: shoulder)
+        path.appendArc(from: NSPoint(x: left, y: bounds.maxY), to: NSPoint(x: right, y: bounds.maxY), radius: bottomRadius)
+        path.appendArc(from: NSPoint(x: right, y: bounds.maxY), to: NSPoint(x: right, y: bounds.minY), radius: bottomRadius)
+        path.appendArc(from: NSPoint(x: right, y: bounds.minY), to: NSPoint(x: bounds.maxX, y: bounds.minY), radius: shoulder)
+        path.close()
+        return path
     }
 
     private func drawDot() {
@@ -334,17 +357,18 @@ final class NotchCardView: NSView {
     }
 
     private func lineRect() -> NSRect {
-        NSRect(
-            x: NotchStyle.horizontalPadding,
+        let padding = NotchStyle.horizontalPadding + sideInset
+        return NSRect(
+            x: padding,
             y: contentTop,
-            width: max(0, bounds.width - 2 * NotchStyle.horizontalPadding),
+            width: max(0, bounds.width - 2 * padding),
             height: NotchStyle.collapsedLineHeight
         )
     }
 
     private func drawExpanded(playhead: (position: TimeInterval, duration: TimeInterval)?) {
         guard let layout else { return }
-        drawArtwork(in: layout.artwork)
+        drawArtwork(in: layout.artwork, style: layout.headerStyle)
         drawHeader(layout)
         for row in layout.rows {
             let isCurrent = row.slot == NotchStyle.rowRadius
@@ -380,8 +404,9 @@ final class NotchCardView: NSView {
     private func drawHeader(_ layout: NotchCardLayout) {
         let title = nowPlaying.map { $0.title.isEmpty ? "Spotify" : $0.title } ?? "Spotify"
         let artist = nowPlaying?.artist ?? "Not playing"
-        drawLabel(title, in: layout.title, font: NotchStyle.titleFont, color: NotchStyle.titleColor)
-        drawLabel(artist, in: layout.artist, font: NotchStyle.artistFont, color: NotchStyle.artistColor)
+        let style = layout.headerStyle
+        drawLabel(title, in: layout.title, font: style.titleFont, color: NotchStyle.titleColor)
+        drawLabel(artist, in: layout.artist, font: style.artistFont, color: NotchStyle.artistColor)
     }
 
     /// Elapsed time, the track, the duration. Without a known duration the row
@@ -442,19 +467,16 @@ final class NotchCardView: NSView {
         }
     }
 
-    private func drawArtwork(in rect: NSRect) {
-        let box = NSBezierPath(
-            roundedRect: rect,
-            xRadius: NotchStyle.artworkCornerRadius,
-            yRadius: NotchStyle.artworkCornerRadius
-        )
+    private func drawArtwork(in rect: NSRect, style: NotchHeaderStyle) {
+        let radius = style.artworkCornerRadius
+        let box = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
         NotchStyle.artworkFill.setFill()
         box.fill()
 
         guard let artwork else {
             let glyph = "♪" as NSString
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: NotchStyle.artworkFont,
+                .font: style.artworkGlyphFont,
                 .foregroundColor: NotchStyle.artworkGlyphColor,
             ]
             let size = glyph.size(withAttributes: attributes)

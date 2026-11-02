@@ -24,7 +24,29 @@ enum NotchStyle {
     /// Slightly squarer than a squircle at this size: a restrained tile next to
     /// the 16 pt card, not a pill.
     static let artworkCornerRadius: CGFloat = 8
+
+    /// On a notched display the header moves into the "ears": the menu-bar
+    /// strips either side of the cutout, which are otherwise dead space in the
+    /// card. The cover, title and artist sit in the left ear and the pin in the
+    /// right one, so the lyrics start right under the cutout. Each ear is this
+    /// wide, which is what makes the card wider than `maxWidth` there: enough
+    /// that most of a title reads before it is ellipsized.
+    static let earWidth: CGFloat = 200
+    /// Space kept clear between ear content and the cutout's edge.
+    static let earNotchGap: CGFloat = 10
+    /// The ear row reaches this far below the cutout, so the header gets some
+    /// breathing room above and below instead of filling the menu-bar height.
+    static let earBandExtra: CGFloat = 8
     static let cornerRadius: CGFloat = 16
+    /// The outward curve where a hardware card meets the screen's top edge, the
+    /// way the real notch does. It is drawn in strips either side of the card's
+    /// body, so the window is this much wider on each side than the visible card.
+    static let shoulderRadius: CGFloat = 8
+
+    /// Transparent strip each side of the body. A simulated pill has no shoulders.
+    static func sideInset(isSimulated: Bool) -> CGFloat {
+        isSimulated ? 0 : shoulderRadius
+    }
 
     /// The dot's window is bigger than the dot so a click can find it.
     static let dotDiameter: CGFloat = 6
@@ -107,10 +129,27 @@ enum NotchStyle {
         max(0, width - 2 * horizontalPadding)
     }
 
-    /// Where the first lyric row may start: below the cutout, the top padding,
-    /// the now-playing header and the gap under it.
-    static func lyricsTop(contentTop: CGFloat) -> CGFloat {
-        contentTop + verticalPadding + artworkSize + headerGap
+    /// The hardware cutout the card hangs from, or nil for a simulated notch,
+    /// which the card draws itself. Everything that differs between the two —
+    /// the blank strip at the top, the shoulders, the header in the ears — is
+    /// derived from this one value.
+    static func cutout(for geometry: NotchGeometry) -> NSSize? {
+        geometry.isSimulated ? nil : geometry.notchFrame.size
+    }
+
+    /// The expanded card's body width: `maxWidth`, or the cutout plus two ears.
+    static func expandedBodyWidth(for geometry: NotchGeometry) -> CGFloat {
+        cutout(for: geometry).map { $0.width + 2 * earWidth } ?? maxWidth
+    }
+
+    /// Where the first lyric row may start: below the cutout and the top
+    /// padding, plus the header's own row unless it sits in the ears.
+    static func lyricsTop(contentTop: CGFloat, headerInEars: Bool) -> CGFloat {
+        contentTop + verticalPadding + (headerInEars ? earBandExtra : artworkSize + headerGap)
+    }
+
+    static func lyricsTop(for geometry: NotchGeometry) -> CGFloat {
+        lyricsTop(contentTop: contentTop(for: geometry), headerInEars: cutout(for: geometry) != nil)
     }
 
     /// Lines further from the current one fade further back.
@@ -154,7 +193,7 @@ enum NotchStyle {
         let measured = NotchText.width(of: text, font: currentFont)
         let width = min(collapsedMaxWidth, max(geometry.notchFrame.width, measured + 2 * horizontalPadding))
         return NSSize(
-            width: ceil(width),
+            width: ceil(width) + 2 * sideInset(isSimulated: geometry.isSimulated),
             height: contentTop(for: geometry) + collapsedLineHeight + bottomPadding
         )
     }
@@ -181,10 +220,46 @@ enum NotchStyle {
     ) -> NSSize {
         NotchCardLayout.make(
             for: window,
-            width: maxWidth,
-            contentTop: contentTop(for: geometry)
+            width: expandedBodyWidth(for: geometry) + 2 * sideInset(isSimulated: geometry.isSimulated),
+            cutout: cutout(for: geometry)
         ).size
     }
+}
+
+/// The now-playing header's metrics. It either takes its own row under the
+/// content top, or — beside a hardware cutout — sits smaller in the ears. One
+/// value per form, so neither the layout nor the drawing branches per metric.
+struct NotchHeaderStyle {
+    let artworkSize: CGFloat
+    let artworkCornerRadius: CGFloat
+    let artworkGap: CGFloat
+    /// The "♪" shown while there is no cover.
+    let artworkGlyphFont: NSFont
+    let titleFont: NSFont
+    let artistFont: NSFont
+    /// Between the title and the artist.
+    let textGap: CGFloat
+
+    static let row = NotchHeaderStyle(
+        artworkSize: NotchStyle.artworkSize,
+        artworkCornerRadius: NotchStyle.artworkCornerRadius,
+        artworkGap: NotchStyle.artworkGap,
+        artworkGlyphFont: NotchStyle.artworkFont,
+        titleFont: NotchStyle.titleFont,
+        artistFont: NotchStyle.artistFont,
+        textGap: 2
+    )
+
+    /// Two lines of this fit the 32–38 pt menu bar of a notched Mac.
+    static let ears = NotchHeaderStyle(
+        artworkSize: 28,
+        artworkCornerRadius: 6,
+        artworkGap: 8,
+        artworkGlyphFont: NSFont.systemFont(ofSize: 14),
+        titleFont: NSFont.systemFont(ofSize: 12, weight: .semibold),
+        artistFont: NSFont.systemFont(ofSize: 11),
+        textGap: 1
+    )
 }
 
 /// One computed geometry for the expanded card: the now-playing header (cover,
@@ -210,6 +285,9 @@ struct NotchCardLayout {
     /// Title over artist, between the cover and the pin.
     let title: NSRect
     let artist: NSRect
+    /// True when the header sits in the ears beside a hardware cutout.
+    let isHeaderInEars: Bool
+    var headerStyle: NotchHeaderStyle { isHeaderInEars ? .ears : .row }
     let pinButton: NSRect
     /// The progress track, and the time labels either side of it.
     let progressBar: NSRect
@@ -229,33 +307,48 @@ struct NotchCardLayout {
     /// ends would otherwise reserve space and leave a song's first lines sitting
     /// near the bottom of the card. The header and footer are fixed bands, so
     /// the card only ever grows or shrinks by its lyric rows.
+    ///
+    /// `cutout` is the hardware notch, nil for a simulated one. With a cutout
+    /// the content starts below it, the window carries shoulders either side,
+    /// and the header moves into the ears beside it instead of taking a row.
     static func make(
         for window: LyricsWindow?,
         width: CGFloat,
-        contentTop: CGFloat
+        cutout: NSSize?
     ) -> NotchCardLayout {
-        let padding = NotchStyle.horizontalPadding
-        let columnWidth = NotchStyle.textColumnWidth(for: width)
+        let contentTop = cutout?.height ?? 0
+        let sideInset = NotchStyle.sideInset(isSimulated: cutout == nil)
+        let padding = NotchStyle.horizontalPadding + sideInset
+        let columnWidth = NotchStyle.textColumnWidth(for: width - 2 * sideInset)
         let windowRows = window?.rows(radius: NotchStyle.rowRadius) ?? []
         let slots = NotchStyle.visibleSlots(in: window)
 
         // Header: cover on the left, pin on the right, title over artist
-        // between them, the pair centred against the cover.
-        let headerTop = contentTop + NotchStyle.verticalPadding
-        let artwork = NSRect(x: padding, y: headerTop, width: NotchStyle.artworkSize, height: NotchStyle.artworkSize)
+        // beside the cover, the pair centred against it. In the ears the row is
+        // the band beside the cutout and the text stops short of the cutout.
+        let isHeaderInEars = cutout != nil
+        let header: NotchHeaderStyle = isHeaderInEars ? .ears : .row
+        let artworkSize = header.artworkSize
+        let headerMidY = isHeaderInEars
+            ? (contentTop + NotchStyle.earBandExtra) / 2
+            : contentTop + NotchStyle.verticalPadding + artworkSize / 2
+        let artwork = NSRect(x: padding, y: headerMidY - artworkSize / 2, width: artworkSize, height: artworkSize)
         let pinButton = NSRect(
             x: width - padding - NotchStyle.pinButtonSize,
-            y: artwork.midY - NotchStyle.pinButtonSize / 2,
+            y: headerMidY - NotchStyle.pinButtonSize / 2,
             width: NotchStyle.pinButtonSize,
             height: NotchStyle.pinButtonSize
         )
-        let textX = artwork.maxX + NotchStyle.artworkGap
-        let textWidth = max(0, pinButton.minX - NotchStyle.pinButtonGap - textX)
-        let titleHeight = ceil(NotchStyle.titleFont.ascender - NotchStyle.titleFont.descender)
-        let artistHeight = ceil(NotchStyle.artistFont.ascender - NotchStyle.artistFont.descender)
-        let textBlockTop = artwork.midY - (titleHeight + 2 + artistHeight) / 2
+        let textX = artwork.maxX + header.artworkGap
+        // In the ears the text stops short of the cutout; in a row, of the pin.
+        let textMaxX = cutout.map { (width - $0.width) / 2 - NotchStyle.earNotchGap }
+            ?? pinButton.minX - NotchStyle.pinButtonGap
+        let textWidth = max(0, textMaxX - textX)
+        let titleHeight = ceil(header.titleFont.ascender - header.titleFont.descender)
+        let artistHeight = ceil(header.artistFont.ascender - header.artistFont.descender)
+        let textBlockTop = headerMidY - (titleHeight + header.textGap + artistHeight) / 2
         let title = NSRect(x: textX, y: textBlockTop, width: textWidth, height: titleHeight)
-        let artist = NSRect(x: textX, y: title.maxY + 2, width: textWidth, height: artistHeight)
+        let artist = NSRect(x: textX, y: title.maxY + header.textGap, width: textWidth, height: artistHeight)
 
         // Lyrics: full width under the header.
         var texts: [[String]] = []
@@ -278,7 +371,7 @@ struct NotchCardLayout {
         }
 
         let rowsHeight = heights.reduce(0, +) + CGFloat(max(0, slots.count - 1)) * NotchStyle.lineSpacing
-        let lyricsTop = NotchStyle.lyricsTop(contentTop: contentTop)
+        let lyricsTop = NotchStyle.lyricsTop(contentTop: contentTop, headerInEars: isHeaderInEars)
         var y = lyricsTop
         var rows: [Row] = []
         for (index, slot) in slots.enumerated() {
@@ -338,6 +431,7 @@ struct NotchCardLayout {
             artwork: artwork,
             title: title,
             artist: artist,
+            isHeaderInEars: isHeaderInEars,
             pinButton: pinButton,
             progressBar: progressBar,
             elapsedLabel: elapsedLabel,
