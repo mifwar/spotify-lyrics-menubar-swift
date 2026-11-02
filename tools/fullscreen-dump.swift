@@ -30,14 +30,9 @@ func check(_ condition: Bool, _ label: String) {
 let ownPID: pid_t = ProcessInfo.processInfo.processIdentifier
 let ignored = FullscreenApps.ignoredBundleIDs
 
-func screen(_ frame: NSRect, dockHeight: CGFloat = 0, menuBarHeight: CGFloat = 0) -> FullscreenApps.ScreenBounds {
-    let visible = NSRect(
-        x: frame.minX,
-        y: frame.minY + dockHeight,
-        width: frame.width,
-        height: frame.height - dockHeight - menuBarHeight
-    )
-    return FullscreenApps.ScreenBounds(frame: frame, visibleFrame: visible)
+/// A display, in the same coordinate space as the windows.
+func screen(_ frame: NSRect) -> NSRect {
+    frame
 }
 
 func window(
@@ -49,69 +44,69 @@ func window(
     FullscreenApps.Window(bounds: rect, ownerPID: pid, layer: layer, bundleID: bundle)
 }
 
-// A notched laptop with a menu bar and a Dock, and a big external display with
-// only a Dock: the tolerance and the per-screen answer differ between them.
-let laptop = screen(NSRect(x: 0, y: 0, width: 1512, height: 982), dockHeight: 70, menuBarHeight: 32)
-let external = screen(NSRect(x: 1512, y: 0, width: 2560, height: 1440), dockHeight: 90)
+// A notched laptop (menu bar band at the top) and a big external display: the
+// per-screen answer differs between them.
+let laptop = screen(NSRect(x: 0, y: 0, width: 1512, height: 982))
+let external = screen(NSRect(x: 1512, y: 0, width: 2560, height: 1440))
 print("screens under test")
-print("  laptop   frame \(laptop.frame) menuBar \(laptop.menuBarHeight) menuBar band")
-print("  external frame \(external.frame) menuBar \(external.menuBarHeight) menuBar band")
+print("  laptop   frame \(laptop)")
+print("  external frame \(external)")
 
 print("\nsynthetic windows")
 check(
-    FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "exact screen coverage blocks"
 )
 check(
-    FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 950)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
-    "top edge stopping at the menu bar still blocks (menu bar tolerance)"
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 950)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    "a window stopping at the menu bar does not block (zoomed windows share that top edge with a real fullscreen one)"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 4, y: 4, width: 1504, height: 974)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 4, y: 4, width: 1504, height: 974)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "slightly inset on every side does not block (conservative)"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 70, width: 1512, height: 912)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 70, width: 1512, height: 912)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "a window above a visible Dock does not block"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 600, y: 400, width: 300, height: 200)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 600, y: 400, width: 300, height: 200)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "a tiny window does not block"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), layer: 20), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), layer: 20), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "the Dock's layer does not block"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 950, width: 1512, height: 32), layer: 24), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 950, width: 1512, height: 32), layer: 24), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "the menu bar's layer does not block"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), layer: 2147483646), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), layer: 2147483646), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "the window server's own layer does not block"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), pid: ownPID), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), pid: ownPID), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "our own pid does not block"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), bundle: "com.spotify.client"), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 1512, height: 982), bundle: "com.spotify.client"), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "Spotify is on the ignore list"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 950, width: 1512, height: 32), bundle: "local.spotify-lyrics-menubar"), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 950, width: 1512, height: 32), bundle: "local.spotify-lyrics-menubar"), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "a second copy of ourselves is on the ignore list"
 )
 check(
-    FullscreenApps.isBlocking(window(NSRect(x: -30, y: -30, width: 1572, height: 1042)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    FullscreenApps.isBlocking(window(NSRect(x: -30, y: -30, width: 1572, height: 1042)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "a window larger than the screen (shadow overshoot) blocks"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 0, height: 0)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: 0, y: 0, width: 0, height: 0)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "a zero-sized window does not block"
 )
 check(
-    !FullscreenApps.isBlocking(window(NSRect(x: CGFloat.nan, y: CGFloat.nan, width: CGFloat.nan, height: CGFloat.nan)), on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(window(NSRect(x: CGFloat.nan, y: CGFloat.nan, width: CGFloat.nan, height: CGFloat.nan)), over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "NaN geometry does not block"
 )
 check(
@@ -120,7 +115,7 @@ check(
             window(NSRect(x: 600, y: 400, width: 300, height: 200)),
             window(NSRect(x: 1512, y: 0, width: 2560, height: 1440)),
         ],
-        on: external, ownPID: ownPID, ignoredBundleIDs: ignored
+        over: external, ownPID: ownPID, ignoredBundleIDs: ignored
     ),
     "any blocking window in the list is enough"
 )
@@ -128,20 +123,20 @@ check(
 print("\nmulti-display")
 let externalFullscreen = window(NSRect(x: 1512, y: 0, width: 2560, height: 1440), bundle: "com.example.game")
 check(
-    !FullscreenApps.isBlocking(windows: [externalFullscreen], on: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
+    !FullscreenApps.isBlocking(windows: [externalFullscreen], over: laptop, ownPID: ownPID, ignoredBundleIDs: ignored),
     "a fullscreen app on the external display does not block the laptop"
 )
 check(
-    FullscreenApps.isBlocking(windows: [externalFullscreen], on: external, ownPID: ownPID, ignoredBundleIDs: ignored),
+    FullscreenApps.isBlocking(windows: [externalFullscreen], over: external, ownPID: ownPID, ignoredBundleIDs: ignored),
     "the same window blocks its own display"
 )
 check(
-    FullscreenApps.isBlocking(windows: [window(NSRect(x: 1512, y: 0, width: 2560, height: 1440))], on: external, ownPID: ownPID, ignoredBundleIDs: ignored),
-    "a display without a menu bar needs exact coverage, no tolerance"
+    FullscreenApps.isBlocking(windows: [window(NSRect(x: 1512, y: 0, width: 2560, height: 1440))], over: external, ownPID: ownPID, ignoredBundleIDs: ignored),
+    "exact coverage of the second display blocks"
 )
 check(
-    !FullscreenApps.isBlocking(windows: [window(NSRect(x: 1512, y: 0, width: 2560, height: 1340))], on: external, ownPID: ownPID, ignoredBundleIDs: ignored),
-    "a display without a menu bar rejects a 100 pt gap"
+    !FullscreenApps.isBlocking(windows: [window(NSRect(x: 1512, y: 0, width: 2560, height: 1340))], over: external, ownPID: ownPID, ignoredBundleIDs: ignored),
+    "a 100 pt gap at the top does not block"
 )
 
 // MARK: - Live window list
@@ -176,10 +171,9 @@ for window in primaryAppWindows.prefix(8) {
 
 print("\nlive answers")
 for screen in NSScreen.screens {
-    let bounds = FullscreenApps.ScreenBounds(frame: screen.frame, visibleFrame: screen.visibleFrame)
-    let blocking = liveWindows.filter { FullscreenApps.isBlocking($0, on: bounds, ownPID: ownPID, ignoredBundleIDs: ignored) }
+    let blocking = liveWindows.filter { FullscreenApps.isBlocking($0, over: screen.frame, ownPID: ownPID, ignoredBundleIDs: ignored) }
     let answer = FullscreenApps.isBlocking(screen: screen, ownPID: ownPID)
-    print("  \(screen.localizedName): menuBarHeight=\(bounds.menuBarHeight) blockingWindows=\(blocking.map { $0.bundleID ?? "pid \($0.ownerPID)" }) -> isBlocking=\(answer)")
+    print("  \(screen.localizedName): blockingWindows=\(blocking.map { $0.bundleID ?? "pid \($0.ownerPID)" }) -> isBlocking=\(answer)")
     check(
         blocking.isEmpty || answer,
         "the per-window and per-screen answers agree on \(screen.localizedName)"

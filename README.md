@@ -59,7 +59,7 @@ In notch mode the menu bar item disappears and the current lyric line attaches t
 - **Click the pin button** in the expanded card’s upper-right corner to keep it open. The filled pin shows that it is pinned; click it again to unpin. A pinned panel ignores hover-out and the paused idle shrink. Clicking the current line, artwork or empty space does not change the pin.
 - **Right-click** the panel for the usual menu: refresh, LRCLib search, clipboard import, plain lyrics, timing offsets.
 - Pausing shrinks it to a small dot after three seconds. With no track at all the dot stays, so the menu is always one right-click away even when Spotify is closed; left-clicking the dot opens the menu.
-- Over a fullscreen app that is not Spotify it hides, unless **Show over fullscreen apps** is checked in the menu (off by default).
+- Over a fullscreen app that is not Spotify it hides, unless **Show over fullscreen apps** is checked in the menu (off by default). Only a window that covers the display all the way to the top edge counts, so a merely zoomed window (a browser filling the space below the menu bar) leaves the pill alone. On a notched display a fullscreen window stops below the cutout band, so the pill keeps its place there.
 
 Displays without a notch, and external monitors, get the same pill at the top center of the screen instead of hanging off a cutout. **Display** in the menu picks which screen it attaches to; the choice is remembered by display, so it survives reconnects.
 

@@ -21,21 +21,6 @@ enum FullscreenApps {
         let bundleID: String?
     }
 
-    /// One display in the same coordinate space, so the decision is per screen:
-    /// a fullscreen app on another display must not hide this display's pill.
-    struct ScreenBounds {
-        let frame: NSRect
-        let visibleFrame: NSRect
-
-        /// The band at the top of the display that the menu bar owns. Some
-        /// "fullscreen" windows stop below it instead of covering the whole
-        /// display, so the top edge gets this much slack while the other three
-        /// edges only get rounding slack.
-        var menuBarHeight: CGFloat {
-            max(0, frame.maxY - visibleFrame.maxY)
-        }
-    }
-
     /// Apps that never count as blocking. Spotify is the app the pill exists to
     /// accompany, and a second copy of ourselves must not hide our own pill
     /// either (the running instance is already excluded by pid).
@@ -48,11 +33,17 @@ enum FullscreenApps {
     /// rounding, shadowless fullscreen windows) and still count.
     private static let edgeSlack: CGFloat = 1
 
-    /// True when this one window covers `screen` and belongs to a real,
-    /// non-ignored app.
+    /// True when this one window covers `frame` (one display) and belongs to a
+    /// real, non-ignored app.
+    ///
+    /// The menu-bar band counts as covered only by a window that actually
+    /// reaches the top edge. It must not get slack: on a notched Mac a real
+    /// fullscreen window also stops at the menu bar, so tolerating that band
+    /// would count every merely zoomed window (a browser filling the screen
+    /// below the menu bar) as fullscreen and hide the pill for good.
     static func isBlocking(
         _ window: Window,
-        on screen: ScreenBounds,
+        over frame: NSRect,
         ownPID: pid_t,
         ignoredBundleIDs: Set<String> = FullscreenApps.ignoredBundleIDs
     ) -> Bool {
@@ -68,25 +59,24 @@ enum FullscreenApps {
         // false for NaN, so bad geometry cannot read as fullscreen.
         guard window.bounds.width > 0, window.bounds.height > 0 else { return false }
 
-        let frame = screen.frame
         guard frame.width > 0, frame.height > 0 else { return false }
 
         let bounds = window.bounds
         return bounds.minX <= frame.minX + edgeSlack
             && bounds.maxX >= frame.maxX - edgeSlack
             && bounds.minY <= frame.minY + edgeSlack
-            && bounds.maxY >= frame.maxY - screen.menuBarHeight - edgeSlack
+            && bounds.maxY >= frame.maxY - edgeSlack
     }
 
-    /// True when any window covers `screen`.
+    /// True when any window covers `frame`.
     static func isBlocking(
         windows: [Window],
-        on screen: ScreenBounds,
+        over frame: NSRect,
         ownPID: pid_t,
         ignoredBundleIDs: Set<String> = FullscreenApps.ignoredBundleIDs
     ) -> Bool {
         windows.contains {
-            isBlocking($0, on: screen, ownPID: ownPID, ignoredBundleIDs: ignoredBundleIDs)
+            isBlocking($0, over: frame, ownPID: ownPID, ignoredBundleIDs: ignoredBundleIDs)
         }
     }
 
@@ -95,11 +85,7 @@ enum FullscreenApps {
         screen: NSScreen,
         ownPID: pid_t = ProcessInfo.processInfo.processIdentifier
     ) -> Bool {
-        isBlocking(
-            windows: currentWindows(),
-            on: ScreenBounds(frame: screen.frame, visibleFrame: screen.visibleFrame),
-            ownPID: ownPID
-        )
+        isBlocking(windows: currentWindows(), over: screen.frame, ownPID: ownPID)
     }
 
     /// The window server's on-screen windows, converted to AppKit coordinates.
