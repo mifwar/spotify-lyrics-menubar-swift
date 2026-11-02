@@ -154,13 +154,16 @@ final class NotchLyricsController: NSObject {
         card.playback = presentation.playback
         card.nowPlaying = target == .dot ? nil : presentation.nowPlaying
         if let geometry {
-            card.isSimulated = geometry.isSimulated
-            card.contentTop = NotchStyle.contentTop(for: geometry)
+            card.cutout = NotchStyle.cutout(for: geometry)
+            // The window's own shadow follows the card's drawn outline and needs
+            // no extra window room. Only the open hardware card lifts off the desktop.
+            panel.hasShadow = target == .expanded && !geometry.isSimulated
         }
         card.setContent(lyrics: target == .dot ? nil : presentation.window, artwork: presentation.artwork)
 
         setTimers(for: target)
         place(target)
+        panel.invalidateShadow()
     }
 
     private func place(_ target: Presence) {

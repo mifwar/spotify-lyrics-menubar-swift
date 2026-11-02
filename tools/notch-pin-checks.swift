@@ -17,12 +17,14 @@ func checkPinInteraction(_ variant: String, geometry: NotchGeometry) {
     let layout = NotchCardLayout.make(
         for: baseWindow,
         width: view.bounds.width,
-        contentTop: NotchStyle.contentTop(for: geometry)
+        cutout: NotchStyle.cutout(for: geometry)
     )
     check(!button.isHidden && button.frame == layout.pinButton, "\(variant): hover exposes the pin button")
     check(view.hitTest(view.convert(NSPoint(x: button.frame.midX, y: button.frame.midY), to: view.superview)) === button,
           "\(variant): clicks on the pin reach the native button")
-    check(button.frame.minY >= NotchStyle.contentTop(for: geometry), "\(variant): pin clears the hardware cutout")
+    let cutoutMinX = view.bounds.midX - geometry.notchFrame.width / 2
+    check(geometry.isSimulated || button.frame.minX > cutoutMinX + geometry.notchFrame.width,
+          "\(variant): pin sits in the right ear, clear of the hardware cutout")
     check(!layout.rows.contains { $0.rect.intersects(button.frame) }, "\(variant): pin never overlaps lyrics")
     check(button.state == .off && button.toolTip == "Pin lyrics open", "\(variant): unpinned control offers pinning")
     check(button.accessibilityLabel() == "Keep lyrics open", "\(variant): pin has an accessible label")
